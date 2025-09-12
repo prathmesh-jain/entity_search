@@ -1,0 +1,1165 @@
+import { useLocation, useNavigate } from 'react-router-dom';
+import { motion, AnimatePresence } from 'framer-motion';
+import { 
+  ArrowLeftIcon, 
+  MagnifyingGlassIcon, 
+  ExclamationTriangleIcon,
+  CheckCircleIcon,
+  InformationCircleIcon,
+  ClockIcon
+} from '@heroicons/react/24/outline';
+import { Fragment, useEffect, useRef, useState } from 'react';
+
+const Results = () => {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const { searchResults, researchId } = location.state || {};
+  
+  // Check for research_id in URL params if not in state
+  const urlParams = new URLSearchParams(location.search);
+  const researchIdFromUrl = urlParams.get('research_id');
+  const finalResearchId = researchId || researchIdFromUrl;
+  
+  const [activeTab, setActiveTab] = useState('overview');
+  const [sourcesPage, setSourcesPage] = useState(1);
+  const [sourcesPerPage, setSourcesPerPage] = useState(10);
+  const [isExporting, setIsExporting] = useState(false);
+  const [status, setStatus] = useState(searchResults ? 'completed' : 'pending');
+  const [phase, setPhase] = useState('starting');
+  const [progress, setProgress] = useState({});
+  const [events, setEvents] = useState([]);
+  const [finalResults, setFinalResults] = useState(searchResults ? searchResults.results : null);
+  const [headerMeta, setHeaderMeta] = useState({ search_id: finalResearchId || 'N/A', timestamp: new Date().toISOString() });
+
+  // Polling for async research (stop when completed)
+  const intervalRef = useRef(null);
+  useEffect(() => {
+    if (finalResearchId) {
+      const poll = async () => {
+        try {
+          const res = await fetch(`http://localhost:8000/research-status/${finalResearchId}`);
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || 'Failed to fetch status');
+          setStatus(data.status);
+          setPhase(data.phase || '');
+          setProgress(data.progress || {});
+          setEvents(data.events || []);
+          setHeaderMeta({ search_id: data.research_id, timestamp: data.started_at });
+          if (data.status === 'completed') {
+            setFinalResults(data.results);
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+              intervalRef.current = null;
+            }
+          }
+        } catch (e) {
+          console.error('Poll error', e);
+        }
+      };
+      // Start polling once
+      poll();
+      if (!intervalRef.current) {
+        intervalRef.current = setInterval(poll, 1500);
+      }
+    } else if (searchResults) {
+      // Synchronous flow compatibility
+      setStatus('completed');
+      setFinalResults(searchResults.results || searchResults);
+      setHeaderMeta({ search_id: searchResults.search_id || 'N/A', timestamp: searchResults.timestamp });
+    } else {
+      navigate('/');
+    }
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [researchId, searchResults, navigate]);
+  console.log("finalResults -> ",finalResults);
+  
+  const entity_name = finalResults?.entity_name || '';
+  const sources = finalResults?.sources || [];
+  const search_results_count = finalResults?.search_results_count || 0;
+  const crawled_pages_count = finalResults?.crawled_pages_count || 0;
+  const per_field_sources = finalResults?.per_field_sources || {};
+  const clusters = finalResults?.clusters || {};
+  const final_entities = finalResults?.final_entities?.entities || [];
+  const basic_info = finalResults?.entity_info || final_entities?.[0]?.combined_fields || {};
+  const search_keywords = finalResults?.search_keywords || searchResults?.keywords || [];
+  
+  const adverse_mentions = [];
+  const search_id = headerMeta.search_id;
+  const timestamp = headerMeta.timestamp;
+
+  const handleNewSearch = () => {
+    navigate('/search');
+  };
+
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      // Simulate API call for export
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      // In a real app, you would trigger a file download here
+      console.log('Exporting data:', data);
+    } catch (error) {
+      console.error('Export failed:', error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const formatDate = (dateString) => {
+    if (!dateString) return 'N/A';
+    const options = { 
+      year: 'numeric', 
+      month: 'long', 
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    };
+    return new Date(dateString).toLocaleDateString(undefined, options);
+  };
+
+  // Safely render values including arrays and objects with nested object support
+  const renderValue = (val) => {
+    if (val == null) return 'N/A';
+    if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+    
+    if (Array.isArray(val)) {
+      return (
+        <ul className="space-y-1">
+          {val.map((item, idx) => (
+            <li key={idx} className="flex items-start">
+              <CheckCircleIcon className="h-4 w-4 text-green-500 mr-2 mt-0.5" />
+              <span className="break-words text-sm">
+                {typeof item === 'object' && item !== null ? renderNestedObject(item) : String(item)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      );
+    }
+    if (typeof val === 'object') {
+      return renderNestedObject(val);
+    }
+    return String(val);
+  };
+
+  // Helper function to render nested objects with compact formatting
+  const renderNestedObject = (obj) => {
+    if (!obj || typeof obj !== 'object') return String(obj);
+    
+    const entries = Object.entries(obj);
+    if (entries.length === 0) return 'N/A';
+    
+    return (
+      <div className="text-xs bg-gray-50 rounded p-1 border border-gray-200 max-w-full">
+        {entries.slice(0, 4).map(([k, v], idx) => (
+          <div key={k} className={`flex justify-between items-start ${idx > 0 ? 'mt-1' : ''}`}>
+            <span className="text-gray-600 text-xs mr-2 flex-shrink-0">
+              {k.replace(/_/g, ' ')}:
+            </span>
+            <span className="text-gray-900 text-xs text-right flex-1 min-w-0">
+              {typeof v === 'object' && v !== null ? (
+                Array.isArray(v) ? (
+                  <span className="text-blue-600 truncate block">[{v.length} items]</span>
+                ) : (
+                  <span className="text-purple-600 truncate block">{Object.keys(v).length} fields</span>
+                )
+              ) : (
+                <span className="truncate block">{String(v)}</span>
+              )}
+            </span>
+          </div>
+        ))}
+        {entries.length > 4 && (
+          <div className="text-gray-500 text-center mt-1 text-xs">
+            +{entries.length - 4} more
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const getSeverityBadge = (severity) => {
+    const severityMap = {
+      high: {
+        bg: 'bg-red-100',
+        text: 'text-red-800',
+        icon: ExclamationTriangleIcon,
+        label: 'High Risk'
+      },
+      medium: {
+        bg: 'bg-yellow-100',
+        text: 'text-yellow-800',
+        icon: InformationCircleIcon,
+        label: 'Medium Risk'
+      },
+      low: {
+        bg: 'bg-green-100',
+        text: 'text-green-800',
+        icon: CheckCircleIcon,
+        label: 'Low Risk'
+      }
+    };
+
+    const { bg, text, icon: Icon, label } = severityMap[severity?.toLowerCase()] || 
+      { bg: 'bg-gray-100', text: 'text-gray-800', icon: InformationCircleIcon, label: 'Unknown' };
+
+    return (
+      <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${bg} ${text}`}>
+        <Icon className={`h-3.5 w-3.5 mr-1.5 ${text}`} />
+        {label}
+      </span>
+    );
+  };
+
+  const clustersCount = Object.values(clusters || {}).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
+  const tabs = [
+    { name: 'Overview', id: 'overview' },
+    { name: 'Details', id: 'details' },
+    { name: 'Entities', id: 'entities', count: final_entities.length || 0 },
+    { name: 'Clusters', id: 'clusters', count: clustersCount },
+    { name: 'Sources', id: 'sources', count: sources?.length || 0 },
+  ];
+
+  // Only show final page when results are populated meaningfully
+  const hasMeaningfulData = () => {
+    if (!finalResults) return false;
+    if ((final_entities?.length || 0) > 0) return true;
+    if (Object.keys(basic_info || {}).length > 0) return true;
+    if ((sources?.length || 0) > 0) return true;
+    return false;
+  };
+  const isReady = status === 'completed' && hasMeaningfulData();
+  const isCompletedNoData = status === 'completed' && !hasMeaningfulData();
+
+  // Completed but no data: show empty state
+  if (isCompletedNoData) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-xl bg-white shadow-lg rounded-2xl p-8 text-center">
+          <div className="mx-auto h-12 w-12 rounded-full bg-gray-100 flex items-center justify-center">
+            <InformationCircleIcon className="h-6 w-6 text-gray-500" />
+          </div>
+          <h2 className="mt-4 text-lg font-semibold text-gray-900">No usable information found</h2>
+          <p className="mt-2 text-sm text-gray-600">We completed the research but couldn’t extract meaningful data from the sources. Try refining the name or adding specific keywords.</p>
+          <div className="mt-6">
+            <button
+              onClick={() => navigate('/search')}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              <MagnifyingGlassIcon className="-ml-1 mr-2 h-5 w-5" />
+              New Search
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Loader view before results are ready
+  if (!isReady) {
+    const phases = ["searching", "crawling", "analyzing", "combining"];
+    const currentIndex = Math.max(0, phases.indexOf((phase || "searching").toLowerCase()));
+    const pct = (progress?.pages_crawled != null && progress?.pages_total) ? Math.min(100, Math.round((progress.pages_crawled / Math.max(1, progress.pages_total)) * 100)) : (currentIndex + 1) * 20;
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center">
+        <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm" />
+        <div className="relative w-full max-w-2xl mx-4 bg-white shadow-2xl rounded-2xl p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-600">Processing</p>
+              <p className="text-lg font-semibold capitalize">{phase || 'starting'}</p>
+            </div>
+            <svg className="animate-spin h-6 w-6 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+            </svg>
+          </div>
+
+          {/* Stepper */}
+          <div className="mt-5">
+            <ol className="flex items-center w-full text-xs text-gray-600">
+              {phases.map((p, idx) => (
+                <li key={p} className={`flex-1 flex items-center ${idx < currentIndex ? 'text-green-600' : (idx === currentIndex ? 'text-blue-600' : 'text-gray-400')}`}>
+                  <div className={`flex items-center`}>
+                    <span className={`h-2 w-2 rounded-full mr-2 ${idx < currentIndex ? 'bg-green-500' : (idx === currentIndex ? 'bg-blue-500' : 'bg-gray-300')}`}></span>
+                    <span className="capitalize">{p}</span>
+                  </div>
+                  {idx < phases.length - 1 && (
+                    <div className="flex-1 mx-2 h-px bg-gray-200" />
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
+
+          {/* Progress bar */}
+          <div className="mt-4">
+            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+              <div className="bg-blue-600 h-2 transition-all" style={{ width: `${pct}%` }} />
+            </div>
+            {progress?.pages_crawled != null && progress?.pages_total != null && (
+              <div className="mt-1 text-xs text-gray-500">{progress.pages_crawled} / {progress.pages_total} pages</div>
+            )}
+          </div>
+
+          {/* Recent events */}
+          {events?.length > 0 && (
+            <div className="mt-4 max-h-48 overflow-auto text-sm text-gray-700 border-t pt-3">
+              {events.slice(-7).map((ev, idx) => (
+                <div key={idx} className="py-1 border-b border-gray-100 last:border-b-0">
+                  <span className="text-gray-400 mr-2">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                  <span className="capitalize text-gray-500">[{ev.phase}]</span> {ev.message}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 pb-16 pt-12">
+      {/* Header */}
+      <div className="bg-white shadow">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="py-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <button
+                  onClick={handleNewSearch}
+                  className="inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-500"
+                >
+                  <ArrowLeftIcon className="h-5 w-5 mr-1.5" />
+                  Back to Search
+                </button>
+                <h1 className="mt-2 text-2xl font-bold text-gray-900">Search Results</h1>
+                <div className="mt-1 flex items-center text-sm text-gray-500">
+                  <span>Search ID: {search_id}</span>
+                  <span className="mx-2">•</span>
+                  <span className="flex items-center">
+                    <ClockIcon className="h-4 w-4 mr-1" />
+                    {formatDate(timestamp)}
+                  </span>
+                </div>
+              </div>
+              <div className="flex space-x-3">
+                {/* <button
+                  type="button"
+                  onClick={handleExport}
+                  disabled={isExporting}
+                  className="inline-flex items-center px-4 py-2 border border-gray-300 shadow-sm text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+                >
+                  {isExporting ? 'Exporting...' : 'Export Report'}
+                </button> */}
+                <button
+                  type="button"
+                  onClick={handleNewSearch}
+                  className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                  <MagnifyingGlassIcon className="-ml-1 mr-2 h-5 w-5" />
+                  New Search
+                </button>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="mt-6">
+              <div className="border-b border-gray-200">
+                <nav className="-mb-px flex space-x-8">
+                  {tabs.map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      className={`${
+                        activeTab === tab.id
+                          ? 'border-blue-500 text-blue-600'
+                          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                      } whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm flex items-center`}
+                    >
+                      {tab.name}
+                      {tab.count > 0 && (
+                        <span 
+                          className={`ml-2 py-0.5 px-2 rounded-full text-xs font-medium ${
+                            activeTab === tab.id 
+                              ? 'bg-blue-100 text-blue-800' 
+                              : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {tab.count}
+                        </span>
+                      )}
+                    </button>
+                  ))}
+                </nav>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Loader / Phase Indicator */}
+        {status !== 'completed' && (
+          <div className="mb-6 rounded-lg bg-white p-4 shadow">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm text-gray-600">Current phase</p>
+                <p className="text-lg font-semibold capitalize">{phase || 'starting'}</p>
+              </div>
+              <div className="text-sm text-gray-600">
+                {progress?.pages_crawled != null && progress?.pages_total != null && (
+                  <span>{progress.pages_crawled} / {progress.pages_total} pages</span>
+                )}
+              </div>
+            </div>
+            {events?.length > 0 && (
+              <div className="mt-3 max-h-40 overflow-auto text-sm text-gray-700">
+                {events.slice(-5).map((ev, idx) => (
+                  <div key={idx} className="py-1 border-b border-gray-100 last:border-b-0">
+                    <span className="text-gray-400 mr-2">{new Date(ev.timestamp).toLocaleTimeString()}</span>
+                    <span className="capitalize text-gray-500">[{ev.phase}]</span> {ev.message}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2 }}
+          >
+            {activeTab === 'overview' && (
+              <div className="space-y-8">
+                {/* Entity Summary Card */}
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 overflow-hidden shadow-lg rounded-xl border border-blue-100">
+                  <div className="px-6 py-6 sm:p-8">
+                    <div className="flex items-center justify-between mb-6">
+                      <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
+                        <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
+                        Entity Summary
+                      </h3>
+                      <div className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm">
+                        Research Complete
+                      </div>
+                    </div>
+                    
+                    {/* Search Keywords Display */}
+                    {search_keywords && search_keywords.length > 0 && (
+                      <div className="mb-6 p-4 bg-white rounded-lg border border-blue-200">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center">
+                          <svg className="w-4 h-4 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
+                          </svg>
+                          Search Keywords Used
+                        </h4>
+                        <div className="flex flex-wrap gap-2">
+                          {search_keywords.map((keyword, idx) => (
+                            <span key={idx} className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200">
+                              {keyword}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
+                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0">
+                            <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                              <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                              </svg>
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <dt className="text-sm font-medium text-gray-500">Entity Name</dt>
+                            <dd className="mt-1 text-xl font-semibold text-gray-900">{entity_name || 'N/A'}</dd>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0">
+                            <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
+                              <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                              </svg>
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <dt className="text-sm font-medium text-gray-500">Search Results</dt>
+                            <dd className="mt-1 text-xl font-semibold text-gray-900">{search_results_count || 0}</dd>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                        <div className="flex items-center">
+                          <div className="flex-shrink-0">
+                            <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
+                              <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                              </svg>
+                            </div>
+                          </div>
+                          <div className="ml-4">
+                            <dt className="text-sm font-medium text-gray-500">Pages Crawled</dt>
+                            <dd className="mt-1 text-xl font-semibold text-gray-900">{crawled_pages_count || 0}</dd>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Entity Information */}
+                <div className="bg-white shadow-lg overflow-hidden rounded-xl border border-gray-100">
+                  <div className="px-6 py-6 sm:px-8 bg-gradient-to-r from-gray-50 to-gray-100">
+                    <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
+                      <div className="w-3 h-3 bg-indigo-500 rounded-full mr-3"></div>
+                      Entity Information
+                    </h3>
+                    <p className="mt-2 text-sm text-gray-600">Key details extracted from multiple sources</p>
+                  </div>
+                  <div className="px-6 py-6 sm:px-8">
+                    {(!basic_info || Object.keys(basic_info).length === 0) ? (
+                      <div className="text-center py-8">
+                        <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                          </svg>
+                        </div>
+                        <p className="text-gray-500">No entity information available</p>
+                      </div>
+                    ) : (
+                      <div className="overflow-hidden">
+                        <table className="min-w-full divide-y divide-gray-200">
+                          <tbody className="bg-white divide-y divide-gray-200">
+                            {Object.entries(basic_info).map(([key, value]) => (
+                              <tr key={key} className="hover:bg-gray-50">
+                                <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 w-1/3">
+                                  <div className="flex items-center">
+                                    <div className="w-2 h-2 bg-blue-400 rounded-full mr-3"></div>
+                                    {key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                                  </div>
+                                </td>
+                                <td className="px-6 py-4 text-sm text-gray-900 w-2/3">
+                                  {renderValue(value)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'entities' && (
+              <div className="space-y-8">
+                {(!final_entities || final_entities.length === 0) ? (
+                  <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                        </svg>
+                      </div>
+                      <h3 className="text-lg font-medium text-gray-900 mb-2">No entities found</h3>
+                      <p className="text-gray-500">No consolidated entity information available.</p>
+                    </div>
+                  </div>
+                ) : (
+                  final_entities.map((entity, entityIndex) => {
+                    const fields = entity.combined_fields || {};
+                    const entitySources = entity.sources || [];
+                    
+                    // Convert fields to table rows
+                    const tableRows = [];
+                    Object.entries(fields).forEach(([key, value]) => {
+                      if (value && value !== '' && value !== null) {
+                        let displayValue;
+                        if (Array.isArray(value)) {
+                          displayValue = value.join(', ');
+                        } else if (typeof value === 'object') {
+                          // Handle nested objects by converting to readable string
+                          displayValue = Object.entries(value)
+                            .map(([k, v]) => {
+                              // Handle nested values that might also be objects or arrays
+                              let formattedValue;
+                              if (Array.isArray(v)) {
+                                formattedValue = v.join(', ');
+                              } else if (typeof v === 'object' && v !== null) {
+                                formattedValue = JSON.stringify(v);
+                              } else {
+                                formattedValue = String(v);
+                              }
+                              return `${k.replace(/_/g, ' ')}: ${formattedValue}`;
+                            })
+                            .join(', ');
+                        } else {
+                          displayValue = String(value);
+                        }
+                        
+                        const categoryName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+                        
+                        tableRows.push({
+                          category: categoryName,
+                          details: displayValue,
+                          sources: entitySources.slice(0, 3) // Show up to 3 sources per field
+                        });
+                      }
+                    });
+
+                    return (
+                      <div key={entityIndex} className="bg-white shadow overflow-hidden sm:rounded-lg border-gray-100 border">
+                        {/* Entity Header */}
+                        <div className="px-4 py-5 sm:px-6 border-b border-gray-200 bg-gradient-to-r from-blue-50 to-purple-50">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center">
+                              <div className="flex-shrink-0">
+                                <div className="w-10 h-10 bg-blue-100 rounded-full flex items-center justify-center">
+                                  <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                                  </svg>
+                                </div>
+                              </div>
+                              <div className="ml-4">
+                                <h3 className="text-lg leading-6 font-medium text-gray-900">
+                                  {entity.canonical_name || 'Unknown Entity'}
+                                </h3>
+                                <p className="mt-1 text-sm text-gray-500">
+                                  Entity #{entityIndex + 1} • {tableRows.length} attributes found
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                                entity.same_as_query 
+                                  ? 'bg-green-100 text-green-800' 
+                                  : 'bg-yellow-100 text-yellow-800'
+                              }`}>
+                                {entity.same_as_query ? '✓ Exact Match' : '~ Similar Match'}
+                              </span>
+                              {entitySources.length > 0 && (
+                                <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                  {entitySources.length} Sources
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Entity Details Table */}
+                        {tableRows.length > 0 ? (
+                          <div className="overflow-hidden">
+                            <table className="min-w-full divide-y divide-gray-200">
+                              <thead className="bg-gray-50">
+                                <tr>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/4">
+                                    Category
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/2">
+                                    Details
+                                  </th>
+                                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-1/4">
+                                    Sources
+                                  </th>
+                                </tr>
+                              </thead>
+                              <tbody className="bg-white divide-y divide-gray-200">
+                                {tableRows.map((row, rowIndex) => (
+                                  <tr key={rowIndex} className="hover:bg-gray-50">
+                                    <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                                      {row.category}
+                                    </td>
+                                    <td className="px-6 py-4 text-sm text-gray-900">
+                                      <div className="max-w-xs lg:max-w-md xl:max-w-lg break-words">
+                                        {row.details}
+                                      </div>
+                                    </td>
+                                    <td className="px-6 py-4 text-sm text-gray-500">
+                                      <div className="flex flex-wrap gap-1">
+                                        {row.sources.length > 0 ? (
+                                          row.sources.map((source, sourceIndex) => (
+                                            <a
+                                              key={sourceIndex}
+                                              href={source}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className="inline-flex items-center px-2 py-1 rounded text-xs bg-blue-100 text-blue-800 hover:bg-blue-200 transition-colors"
+                                            >
+                                              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                              </svg>
+                                              {sourceIndex + 1}
+                                            </a>
+                                          ))
+                                        ) : (
+                                          <span className="text-gray-400 italic text-xs">All sources</span>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        ) : (
+                          <div className="px-6 py-8 text-center">
+                            <p className="text-gray-500 text-sm">No detailed information available for this entity.</p>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {activeTab === 'details' && (
+              <div className="bg-white shadow-lg overflow-hidden rounded-xl border border-gray-100">
+                <div className="px-6 py-6 sm:px-8 bg-gradient-to-r from-purple-50 to-pink-50">
+                  <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
+                    <div className="w-3 h-3 bg-purple-500 rounded-full mr-3"></div>
+                    Detailed Information
+                  </h3>
+                  <p className="mt-2 text-sm text-gray-600">
+                    Comprehensive details extracted from various sources with source attribution.
+                  </p>
+                </div>
+                <div className="px-6 py-6 sm:px-8">
+                  {(!basic_info || Object.keys(basic_info).length === 0) ? (
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                      </div>
+                      <h3 className="text-lg font-medium text-gray-900 mb-2">No detailed information</h3>
+                      <p className="text-gray-500">No comprehensive details available from sources.</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      {Object.entries(basic_info).map(([key, value]) => (
+                        <div key={key} className="bg-gradient-to-r from-white to-gray-50 border border-gray-200 rounded-lg p-5 hover:shadow-md transition-all duration-200">
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1">
+                              <dt className="text-sm font-bold text-gray-700 capitalize mb-3 flex items-center">
+                                <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center mr-3">
+                                  <svg className="w-4 h-4 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                  </svg>
+                                </div>
+                                {key.replace(/_/g, ' ')}
+                              </dt>
+                              <dd className="text-sm text-gray-900 ml-11">
+                                <div className="bg-white p-3 rounded border border-gray-100">
+                                  {Array.isArray(value) ? (
+                                    <div className="flex flex-wrap gap-2">
+                                      {value.map((item, idx) => (
+                                        <span key={idx} className="inline-block bg-purple-50 text-purple-800 px-2 py-1 rounded text-xs">
+                                          {typeof item === 'object' && item !== null ? renderNestedObject(item) : String(item)}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  ) : typeof value === 'object' && value !== null ? (
+                                    renderValue(value)
+                                  ) : (
+                                    <span className="text-gray-900">{String(value || 'N/A')}</span>
+                                  )}
+                                </div>
+                                {per_field_sources && per_field_sources[key] && per_field_sources[key].length > 0 && (
+                                  <div className="mt-3 p-3 bg-gray-50 rounded border border-gray-100">
+                                    <span className="text-xs font-semibold text-gray-600 mb-2 block">Verified Sources:</span>
+                                    <div className="flex flex-wrap gap-2">
+                                      {per_field_sources[key].map((u, idx) => (
+                                        <a key={idx} href={u} target="_blank" rel="noopener noreferrer" 
+                                           className="inline-flex items-center px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-xs transition-colors">
+                                          <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                          </svg>
+                                          Source {idx + 1}
+                                        </a>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </dd>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'clusters' && (
+              <div className="bg-white shadow-lg overflow-hidden rounded-xl border border-gray-100">
+                <div className="px-6 py-6 sm:px-8 bg-gradient-to-r from-orange-50 to-amber-50">
+                  <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
+                    <div className="w-3 h-3 bg-orange-500 rounded-full mr-3"></div>
+                    Profile Clusters
+                  </h3>
+                  <p className="mt-2 text-sm text-gray-600">Profiles grouped by detected entity name and certainty level.</p>
+                </div>
+                <div className="px-6 py-6 sm:px-8">
+                  {(!clusters || Object.keys(clusters).length === 0) ? (
+                    <div className="text-center py-12">
+                      <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10" />
+                        </svg>
+                      </div>
+                      <h3 className="text-lg font-medium text-gray-900 mb-2">No clusters found</h3>
+                      <p className="text-gray-500">No profile clusters available.</p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                      {Object.entries(clusters || {}).map(([name, items]) => (
+                        <div key={name} className="bg-gradient-to-br from-white to-orange-50 border border-orange-200 rounded-xl p-6 shadow-sm hover:shadow-md transition-all duration-200">
+                          <div className="flex items-center justify-between mb-4">
+                            <div className="flex items-center">
+                              <div className="w-10 h-10 bg-orange-100 rounded-full flex items-center justify-center mr-3">
+                                <svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                                </svg>
+                              </div>
+                              <div>
+                                <h4 className="text-lg font-bold text-gray-900 break-words capitalize">{name.replace(/_/g,' ')}</h4>
+                                <p className="text-sm text-gray-500">Cluster Group</p>
+                              </div>
+                            </div>
+                            <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-orange-100 text-orange-800 border border-orange-200">
+                              {Array.isArray(items) ? items.length : 0} profiles
+                            </span>
+                          </div>
+                          
+                          <div className="space-y-3 max-h-80 overflow-auto">
+                            {Array.isArray(items) && items.map((p, i) => (
+                              <div key={i} className="bg-white border border-gray-200 rounded-lg p-4 hover:bg-gray-50 transition-colors">
+                                <div className="flex items-start justify-between mb-2">
+                                  <h5 className="font-semibold text-gray-900 break-words text-sm">
+                                    {p.source_title || p.detected_entity_name || 'Profile'}
+                                  </h5>
+                                  <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded">
+                                    Profile {i + 1}
+                                  </span>
+                                </div>
+                                
+                                {p.source_url && (
+                                  <div className="mb-3">
+                                    <a href={p.source_url} target="_blank" rel="noreferrer" 
+                                       className="inline-flex items-center text-xs text-blue-600 hover:text-blue-800 break-all">
+                                      <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                      </svg>
+                                      View Source
+                                    </a>
+                                  </div>
+                                )}
+                                
+                                {p.extracted_info && Object.keys(p.extracted_info).length > 0 && (
+                                  <div className="border-t border-gray-100 pt-3">
+                                    <h6 className="text-xs font-semibold text-gray-600 mb-2">Key Information:</h6>
+                                    <div className="grid grid-cols-1 gap-2">
+                                      {Object.entries(p.extracted_info).slice(0,4).map(([k,v]) => (
+                                        <div key={k} className="flex justify-between items-start">
+                                          <span className="text-xs font-medium text-gray-600 capitalize">{k.replace(/_/g,' ')}:</span>
+                                          <span className="text-xs text-gray-900 ml-2 text-right">
+                                            {typeof v === 'object' && v !== null ? renderNestedObject(v) : String(v)}
+                                          </span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'mentions' && (
+              <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div className="px-4 py-5 sm:px-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg leading-6 font-medium text-gray-900">
+                        Adverse Mentions
+                      </h3>
+                      <p className="mt-1 max-w-2xl text-sm text-gray-500">
+                        Potential adverse information found in public records.
+                      </p>
+                    </div>
+                    <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
+                      {adverse_mentions?.length || 0} found
+                    </span>
+                  </div>
+                </div>
+                <div className="border-t border-gray-200">
+                  {adverse_mentions?.length > 0 ? (
+                    <ul className="divide-y divide-gray-200">
+                      {adverse_mentions.map((mention, index) => (
+                        <li key={index} className="px-4 py-5 sm:px-6 hover:bg-gray-50 transition-colors">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center">
+                              <div className="flex-shrink-0">
+                                {mention.severity === 'high' ? (
+                                  <ExclamationTriangleIcon className="h-5 w-5 text-red-500" />
+                                ) : mention.severity === 'medium' ? (
+                                  <InformationCircleIcon className="h-5 w-5 text-yellow-500" />
+                                ) : (
+                                  <CheckCircleIcon className="h-5 w-5 text-green-500" />
+                                )}
+                              </div>
+                              <p className="ml-3 text-sm font-medium text-gray-900">
+                                {mention.title}
+                              </p>
+                            </div>
+                            <div className="ml-2 flex-shrink-0 flex">
+                              {getSeverityBadge(mention.severity)}
+                            </div>
+                          </div>
+                          <div className="mt-2 sm:flex sm:justify-between">
+                            <div className="sm:flex">
+                              <p className="flex items-center text-sm text-gray-500">
+                                <span className="font-medium">Source:</span> {mention.source}
+                              </p>
+                              <p className="mt-2 flex items-center text-sm text-gray-500 sm:mt-0 sm:ml-6">
+                                <ClockIcon className="flex-shrink-0 mr-1.5 h-4 w-4 text-gray-400" />
+                                {mention.date}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="mt-3">
+                            <p className="text-sm text-gray-600">
+                              {mention.snippet}
+                            </p>
+                            <div className="mt-2">
+                              <a
+                                href="#"
+                                className="inline-flex items-center text-sm font-medium text-blue-600 hover:text-blue-500"
+                              >
+                                View full article <span aria-hidden="true">→</span>
+                              </a>
+                            </div>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-center py-12">
+                      <CheckCircleIcon className="mx-auto h-12 w-12 text-green-500" />
+                      <h3 className="mt-2 text-sm font-medium text-gray-900">No adverse mentions found</h3>
+                      <p className="mt-1 text-sm text-gray-500">
+                        No adverse information was found for this entity in our database.
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'sources' && (
+              <div className="bg-white shadow overflow-hidden sm:rounded-lg">
+                <div className="px-4 py-5 sm:px-6 border-b border-gray-200">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="text-lg leading-6 font-medium text-gray-900">
+                        Information Sources
+                      </h3>
+                      <p className="mt-1 max-w-2xl text-sm text-gray-500">
+                        Websites and documents used to gather information about this entity.
+                      </p>
+                    </div>
+                    <div className="flex items-center space-x-4">
+                      <div className="flex items-center space-x-2">
+                        <label htmlFor="sources-per-page" className="text-sm text-gray-700">Show:</label>
+                        <select
+                          id="sources-per-page"
+                          value={sourcesPerPage}
+                          onChange={(e) => {
+                            setSourcesPerPage(Number(e.target.value));
+                            setSourcesPage(1);
+                          }}
+                          className="border border-gray-300 rounded text-sm px-2 py-1"
+                        >
+                          <option value={10}>10</option>
+                          <option value={25}>25</option>
+                          <option value={50}>50</option>
+                          <option value={100}>100</option>
+                        </select>
+                        <span className="text-sm text-gray-700">per page</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div className="border-t border-gray-200">
+                  {(!sources || sources.length === 0) ? (
+                    <div className="px-4 py-4 text-center text-gray-500">
+                      No sources available
+                    </div>
+                  ) : (
+                    <>
+                      <ul className="divide-y divide-gray-200">
+                        {sources
+                          .slice((sourcesPage - 1) * sourcesPerPage, sourcesPage * sourcesPerPage)
+                          .map((source, index) => (
+                          <li key={index}>
+                            <div className="px-4 py-4 sm:px-6">
+                              <div className="flex items-center justify-between">
+                                <p className="text-sm font-medium text-blue-600 truncate">
+                                  <a href={source.url} target="_blank" rel="noopener noreferrer" className="hover:underline">
+                                    {source.title || source.url}
+                                  </a>
+                                </p>
+                                <div className="ml-2 flex-shrink-0 flex">
+                                  <p className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${source.success ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                    {source.success ? 'Success' : 'Error'}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="mt-2 sm:flex sm:justify-between">
+                                <div className="sm:flex">
+                                  <p className="flex items-center text-sm text-gray-500 break-all">
+                                    {source.url}
+                                  </p>
+                                </div>
+                                <div className="mt-2 flex items-center text-sm text-gray-500 sm:mt-0">
+                                  <p>
+                                    Status: {source.status_code}
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                      {sources.length > sourcesPerPage && (
+                        <div className="bg-white px-4 py-3 flex items-center justify-between border-t border-gray-200 sm:px-6">
+                          <div className="flex-1 flex justify-between sm:hidden">
+                            <button
+                              onClick={() => setSourcesPage(Math.max(1, sourcesPage - 1))}
+                              disabled={sourcesPage === 1}
+                              className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                            >
+                              Previous
+                            </button>
+                            <button
+                              onClick={() => setSourcesPage(Math.min(Math.ceil(sources.length / sourcesPerPage), sourcesPage + 1))}
+                              disabled={sourcesPage >= Math.ceil(sources.length / sourcesPerPage)}
+                              className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                            >
+                              Next
+                            </button>
+                          </div>
+                          <div className="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
+                            <div>
+                              <p className="text-sm text-gray-700">
+                                Showing{' '}
+                                <span className="font-medium">{(sourcesPage - 1) * sourcesPerPage + 1}</span>
+                                {' '}to{' '}
+                                <span className="font-medium">
+                                  {Math.min(sourcesPage * sourcesPerPage, sources.length)}
+                                </span>
+                                {' '}of{' '}
+                                <span className="font-medium">{sources.length}</span>
+                                {' '}results
+                              </p>
+                            </div>
+                            <div>
+                              <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
+                                <button
+                                  onClick={() => setSourcesPage(Math.max(1, sourcesPage - 1))}
+                                  disabled={sourcesPage === 1}
+                                  className="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                  <span className="sr-only">Previous</span>
+                                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clipRule="evenodd" />
+                                  </svg>
+                                </button>
+                                {Array.from({ length: Math.ceil(sources.length / sourcesPerPage) }, (_, i) => i + 1)
+                                  .filter(page => 
+                                    page === 1 || 
+                                    page === Math.ceil(sources.length / sourcesPerPage) || 
+                                    Math.abs(page - sourcesPage) <= 2
+                                  )
+                                  .map((page, index, array) => (
+                                    <Fragment key={page}>
+                                      {index > 0 && array[index - 1] !== page - 1 && (
+                                        <span className="relative inline-flex items-center px-4 py-2 border border-gray-300 bg-white text-sm font-medium text-gray-700">
+                                          ...
+                                        </span>
+                                      )}
+                                      <button
+                                        onClick={() => setSourcesPage(page)}
+                                        className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
+                                          page === sourcesPage
+                                            ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
+                                            : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
+                                        }`}
+                                      >
+                                        {page}
+                                      </button>
+                                    </Fragment>
+                                  ))}
+                                <button
+                                  onClick={() => setSourcesPage(Math.min(Math.ceil(sources.length / sourcesPerPage), sourcesPage + 1))}
+                                  disabled={sourcesPage >= Math.ceil(sources.length / sourcesPerPage)}
+                                  className="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 bg-white text-sm font-medium text-gray-500 hover:bg-gray-50 disabled:opacity-50"
+                                >
+                                  <span className="sr-only">Next</span>
+                                  <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clipRule="evenodd" />
+                                  </svg>
+                                </button>
+                              </nav>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </motion.div>
+        </AnimatePresence>
+
+        <div className="mt-8 text-center">
+          <button
+            onClick={handleNewSearch}
+            className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+          >
+            <MagnifyingGlassIcon className="-ml-1 mr-2 h-5 w-5" />
+            Perform Another Search
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Results;
