@@ -7,6 +7,7 @@ import os
 import time
 
 from .base import BaseSearchEngine, SearchResult
+from ...utils.api_key_rotator import get_google_rotator
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class GoogleSearchEngine(BaseSearchEngine):
         self.max_retries = max_retries
         self.request_delay = request_delay
         self.last_request_time = 0
+        self.api_key_rotator = get_google_rotator()
     
     async def _enforce_rate_limit(self):
         """Enforce rate limiting by waiting if needed."""
@@ -38,8 +40,8 @@ class GoogleSearchEngine(BaseSearchEngine):
         self.last_request_time = time.time()
 
     async def _google_api_search(self, client: httpx.AsyncClient, query: str, num: int, start: int = 1) -> Optional[Dict[str, Any]]:
-        """Make request to Google Custom Search API."""
-        api_key = os.getenv("GOOGLE_API_KEY")
+        """Make request to Google Custom Search API with proper key rotation."""
+        api_key = self.api_key_rotator.get_current_key()
         cx = os.getenv("GOOGLE_CX")
         
         if not api_key or not cx:
@@ -50,10 +52,12 @@ class GoogleSearchEngine(BaseSearchEngine):
             'key': api_key,
             'cx': cx,
             'q': query,
-            'num': min(num, 100),  # Google API max 100 per request
+            'num': 10,  # Google API max 100 per request
             'start': start,
-            'safe': 'off'
         }
+        
+        key_rotation_attempts = 0
+        max_key_rotations = len(self.api_key_rotator.keys) * 2  # Try each key twice
         
         for attempt in range(self.max_retries + 1):
             try:
@@ -65,11 +69,49 @@ class GoogleSearchEngine(BaseSearchEngine):
                 if resp.status_code == 200:
                     return resp.json()
                 elif resp.status_code == 429:
-                    # Rate limited
+                    # Rate limited - mark key as failed and rotate
+                    self.api_key_rotator.mark_key_failed(api_key, f"Rate limit error 429")
+                    
+                    # Check if we have any available keys left
+                    if not self.api_key_rotator.has_available_keys():
+                        logger.error(f"All Google API keys exhausted after rate limit errors")
+                        return None
+                    
+                    key_rotation_attempts += 1
+                    if key_rotation_attempts >= max_key_rotations:
+                        logger.error(f"Exhausted all Google API keys after {key_rotation_attempts} rotations")
+                        return None
+                    
                     retry_after = int(resp.headers.get('Retry-After', 0)) or int(20 + random.uniform(0, 10))
-                    logger.warning(f"Google API rate limited. Retrying in {retry_after}s")
+                    logger.warning(f"Google API rate limited. Rotating key and retrying in {retry_after}s (rotation {key_rotation_attempts})")
                     await asyncio.sleep(retry_after)
+                    
+                    # Get new key for next attempt
+                    api_key = self.api_key_rotator.get_current_key()
+                    if api_key:
+                        params['key'] = api_key
                     continue
+                elif resp.status_code in [401, 403]:
+                    # Authentication/authorization errors - mark key as failed and rotate
+                    self.api_key_rotator.mark_key_failed(api_key, f"Auth error {resp.status_code}")
+                    
+                    # Check if we have any available keys left
+                    if not self.api_key_rotator.has_available_keys():
+                        logger.error(f"All Google API keys exhausted after auth errors")
+                        return None
+                    
+                    key_rotation_attempts += 1
+                    if key_rotation_attempts >= max_key_rotations:
+                        logger.error(f"Exhausted all Google API keys after {key_rotation_attempts} rotations")
+                        return None
+                    
+                    logger.warning(f"Google API auth error {resp.status_code}. Rotating key (rotation {key_rotation_attempts})")
+                    
+                    # Get new key for next attempt
+                    api_key = self.api_key_rotator.get_current_key()
+                    if api_key:
+                        params['key'] = api_key
+                    await asyncio.sleep(2 ** attempt + random.random())
                 else:
                     logger.warning(f"Google API returned status {resp.status_code}: {resp.text[:200]}")
                     await asyncio.sleep(2 ** attempt + random.random())
@@ -125,20 +167,19 @@ class GoogleSearchEngine(BaseSearchEngine):
                     if not link or not isinstance(link, str):
                         continue
                         
-                    clean = self.clean_url(link)
-                    if not clean or clean in seen:
+                    if link in seen:
                         continue
                         
-                    seen.add(clean)
-                    results.append(SearchResult(url=clean, source='google'))
+                    seen.add(link)
+                    results.append(SearchResult(url=link, source='google'))
                     
                     if len(results) >= max_results:
                         break
                         
                 # If we got fewer items than requested, we've reached the end of available results
-                if len(items) < num_to_fetch:
-                    logger.info(f"Received fewer items ({len(items)}) than requested ({num_to_fetch}), stopping pagination")
-                    break
+                # if len(items) < num_to_fetch:
+                #     logger.info(f"Received fewer items ({len(items)}) than requested ({num_to_fetch}), stopping pagination")
+                #     break
                     
                 # Move to next page - increment by the number of items we actually got
                 start += len(items)

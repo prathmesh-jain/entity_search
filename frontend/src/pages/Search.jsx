@@ -5,11 +5,27 @@ import { XMarkIcon, MagnifyingGlassIcon, PlusCircleIcon, XCircleIcon } from '@he
 
 const Search = () => {
   const [entityName, setEntityName] = useState('');
+  const [entityType, setEntityType] = useState('');
   const [keywords, setKeywords] = useState(['']);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
   const [isFocused, setIsFocused] = useState(false);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
   const navigate = useNavigate();
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownOpen && !event.target.closest('.dropdown-container')) {
+        setDropdownOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [dropdownOpen]);
 
   // Animation variants
   const containerVariants = {
@@ -65,6 +81,11 @@ const Search = () => {
       return;
     }
 
+    if (!entityType) {
+      setError('Please select an entity type');
+      return;
+    }
+
     // Filter out empty keywords
     const validKeywords = keywords.filter(keyword => keyword.trim() !== '');
     
@@ -85,6 +106,7 @@ const Search = () => {
         },
         body: JSON.stringify({
           entity_name: entityName.trim(),
+          entity_type: entityType,
           keywords: validKeywords,
         }),
       });
@@ -173,6 +195,93 @@ const Search = () => {
                   autoComplete="off"
                 />
               </div>
+            </motion.div>
+
+            {/* Entity Type */}
+            <motion.div variants={itemVariants}>
+              <label htmlFor="entityType" className="block text-sm font-medium text-gray-700 mb-2">
+                Entity Type <span className="text-red-500">*</span>
+              </label>
+              <div className="relative dropdown-container">
+                <button
+                  type="button"
+                  onClick={() => setDropdownOpen(!dropdownOpen)}
+                  className={`
+                    w-full text-left px-4 py-3 pr-10 border border-gray-300 rounded-lg
+                    bg-white shadow-sm transition-all duration-200 outline-none
+                    focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+                    hover:border-blue-400 hover:shadow-md
+                    ${entityType ? 'text-gray-900' : 'text-gray-500'}
+                    ${isLoading ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}
+                  `}
+                  disabled={isLoading}
+                >
+                  {entityType === 'individual' ? 'Individual Person' : 
+                   entityType === 'company' ? 'Company / Organization' : 
+                   'Choose entity type...'}
+                </button>
+                
+                {/* Dropdown Arrow */}
+                <div className="absolute inset-y-0 right-0 pr-4 flex items-center pointer-events-none">
+                  <svg 
+                    className={`h-5 w-5 text-blue-500 transition-transform duration-200 ${dropdownOpen ? 'rotate-180' : ''}`} 
+                    fill="none" 
+                    stroke="currentColor" 
+                    viewBox="0 0 24 24"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </div>
+
+                {/* Custom Dropdown Options */}
+                {dropdownOpen && (
+                  <div className="absolute z-50 w-full mt-1 bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden">
+                    <div 
+                      className="px-4 py-3 hover:bg-blue-50 cursor-pointer transition-colors duration-150 border-b border-gray-100"
+                      onClick={() => {
+                        setEntityType('individual');
+                        setDropdownOpen(false);
+                      }}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                          <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                          </svg>
+                        </div>
+                        <div>
+                          <div className="font-medium text-gray-900">Individual Person</div>
+                          <div className="text-sm text-gray-500">Search for people, celebrities, professionals</div>
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div 
+                      className="px-4 py-3 hover:bg-blue-50 cursor-pointer transition-colors duration-150"
+                      onClick={() => {
+                        setEntityType('company');
+                        setDropdownOpen(false);
+                      }}
+                    >
+                      <div className="flex items-center space-x-3">
+                        <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
+                          <svg className="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                          </svg>
+                        </div>
+                        <div>
+                          <div className="font-medium text-gray-900">Company / Organization</div>
+                          <div className="text-sm text-gray-500">Search for businesses, startups, organizations</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              <p className="mt-2 text-sm text-gray-600">
+                Select the type of entity you want to research for better targeted results.
+              </p>
             </motion.div>
 
             {/* Keywords */}

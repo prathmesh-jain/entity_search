@@ -6,6 +6,8 @@ import json
 import asyncio
 import logging
 
+from ...utils.api_key_rotator import get_gemini_rotator
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -20,22 +22,201 @@ class GeminiClient:
         Initialize the Gemini client.
         
         Args:
-            api_key: Optional API key. If not provided, will use GEMINI_API_KEY from environment.
+            api_key: Optional API key. If not provided, will use rotating API keys from environment.
         """
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
+        self.api_key_rotator = get_gemini_rotator()
+        self.current_api_key = api_key or self.api_key_rotator.get_current_key()
+        
+        if not self.current_api_key:
             raise ValueError("Gemini API key is required. Set GEMINI_API_KEY environment variable.")
             
         self.client = AsyncOpenAI(
-            api_key=self.api_key,
+            api_key=self.current_api_key,
             base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
         )
         self.model = "gemini-2.5-flash"  # Default model
+    
+    def _refresh_client_with_new_key(self):
+        """Refresh the OpenAI client with a new API key from the rotator."""
+        new_key = self.api_key_rotator.get_current_key()
+        if new_key and new_key != self.current_api_key:
+            self.current_api_key = new_key
+            self.client = AsyncOpenAI(
+                api_key=self.current_api_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
+            )
+            logger.info("Refreshed Gemini client with new API key")
+    
+    async def generate_search_queries(
+        self,
+        entity_name: str,
+        entity_type: str,
+        keywords: Optional[List[str]] = None,
+        num_queries: int = 4
+    ) -> List[str]:
+        """
+        Generate intelligent search queries using LLM for better entity research.
+        
+        Args:
+            entity_name: Name of the entity to research
+            entity_type: Type of entity ('individual' or 'company')
+            keywords: Optional list of keywords to incorporate
+            num_queries: Number of search queries to generate
+            
+        Returns:
+            List of optimized search queries
+        """
+        try:
+            logger.info(f"Generating LLM search queries for {entity_type}: {entity_name}")
+            
+            keywords_context = ""
+            if keywords:
+                keywords_context = f"\nUser-provided keywords: {', '.join(keywords)}"
+            
+            entity_context = "person" if entity_type == "individual" else "company/organization"
+            
+            prompt = f"""
+            You are an expert search query generator for entity research. Generate {num_queries} highly effective search queries to find comprehensive information about a specific {entity_context}.
+            
+            TARGET {entity_type.upper()}: "{entity_name}"
+            ENTITY TYPE: {entity_type}{keywords_context}
+            
+            QUERY GENERATION STRATEGY:
+            
+            For INDIVIDUALS:
+            - Professional background and career information
+            - Educational history and qualifications
+            - Personal details and biographical information
+            - Recent news, achievements, or controversies
+            - Legal issues, criminal records, or court cases
+            - Family connections and relationships
+            - Location and residence information
+            
+            For COMPANIES:
+            - Business registration and incorporation details
+            - Financial information and market performance
+            - Key executives, founders, and leadership team
+            - Products, services, and business activities
+            - Legal issues, lawsuits, or regulatory actions
+            - Mergers, acquisitions, and partnerships
+            - Industry reputation and news coverage
+            - Headquarters location and office addresses
+            
+            SEARCH OPTIMIZATION RULES:
+            1. Use varied search patterns (exact quotes, combinations, specific terms)
+            2. Include location-based searches if keywords suggest geography
+            3. Add professional context if keywords indicate occupation/industry
+            4. Use both formal and informal name variations
+            5. Include time-sensitive searches for recent information
+            6. Add verification searches for identity confirmation
+            7. Incorporate keyword context naturally into queries
+            8. Avoid overly complex or lengthy search terms
+            
+            
+            Generate exactly {num_queries} diverse, effective search queries. Return ONLY the queries, one per line, without numbering or formatting.
+            """
+            
+            response = await self._chat_completion_with_retry(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,  # Slightly higher for creative query generation
+                max_tokens=2000
+            )
+            
+            if not response or not response.choices:
+                logger.warning("Empty response from LLM query generation")
+                return self._fallback_queries(entity_name, entity_type, keywords)
+            
+            content = response.choices[0].message.content
+            if content is None:
+                logger.warning("LLM returned None content for query generation")
+                return self._fallback_queries(entity_name, entity_type, keywords)
+            
+            content = content.strip()
+            queries = [q.strip() for q in content.split('\n') if q.strip()]
+            
+            # Filter out empty queries and ensure we have the right number
+            queries = [q for q in queries if len(q) > 5]  # Minimum query length
+            
+            if len(queries) < num_queries:
+                logger.warning(f"LLM generated only {len(queries)} queries, expected {num_queries}")
+                # Add fallback queries if needed
+                fallback = self._fallback_queries(entity_name, entity_type, keywords)
+                queries.extend(fallback[:num_queries - len(queries)])
+            
+            queries = queries[:num_queries]  # Ensure exact number
+            
+            logger.info(f"Generated {len(queries)} LLM search queries for {entity_name}")
+            return queries
+            
+        except Exception as e:
+            logger.error(f"Error generating LLM search queries: {e}")
+            return self._fallback_queries(entity_name, entity_type, keywords)
+    
+    def _fallback_queries(self, entity_name: str, entity_type: str, keywords: Optional[List[str]] = None) -> List[str]:
+        """Generate fallback search queries when LLM generation fails."""
+        base_queries = []
+        
+        if keywords:
+            # Combine entity name with each keyword
+            for keyword in keywords[:3]:  # Limit to avoid too many queries
+                base_queries.append(f'{entity_name} {keyword}')
+        
+        # if entity_type == "individual":
+        #     base_queries.extend([
+        #         f'{entity_name} biography',
+        #         f'{entity_name} profile background',
+        #         f'{entity_name} news recent'
+        #     ])
+        # else:  # company
+        #     base_queries.extend([
+        #         f'{entity_name} company information',
+        #         f'{entity_name} business registration',
+        #         f'{entity_name} executives leadership'
+        #     ])
+        
+        return base_queries[:4]  # Return up to 4 queries
+    
+    def _get_fields_for_entity_type(self, entity_type: str) -> List[str]:
+        """Get appropriate extraction fields based on entity type."""
+        if entity_type == "individual":
+            return [
+                "date_of_birth", "year_of_birth", "age", "gender", "nationality",
+                "full_name", "aliases", "spouse_name", "family_members",
+                "educational_background", "professional_background", "employment_history",
+                "government_issued_unique_identifier", "social_security_number",
+                "status_alive_deceased", "chinese_name_character", "maiden_name",
+                "place_of_birth", "residence_location", "citizenship",
+                "occupation", "job_title", "employer", "awards_honors",
+                "criminal_record", "legal_issues", "political_affiliation",
+                "contact_information"
+            ]
+        elif entity_type == "company":
+            return [
+                "date_of_incorporation", "year_established", "company_age",
+                "legal_entity_identifier", "registration_number", "tax_id",
+                "business_activity_type", "industry_sector", "company_size",
+                "headquarters_location", "registered_address", "operating_locations",
+                "ceo_founder", "key_executives", "board_members",
+                "parent_company", "subsidiaries", "ownership_structure",
+                "revenue", "market_capitalization", "employee_count",
+                "stock_symbol", "exchange_listing", "financial_status",
+                "legal_status", "business_license", "regulatory_compliance",
+                "website", "contact_information", "products_services", "competitors", "partnerships",
+                "mergers_acquisitions", "legal_issues", "bankruptcy_status"
+            ]
+        else:
+            # Fallback to combined fields for unknown types
+            return [
+                "date_of_birth", "year_of_birth", "age", "gender", "nationality",
+                "date_of_incorporation", "business_activity_type", "location",
+                "full_name", "legal_entity_identifier", "status_alive_deceased"
+            ]
         
     async def extract_entity_info(
         self,
         content: str,
         entity_name: str,
+        entity_type: str,
         fields: Optional[List[str]] = None,
         keywords: Optional[List[str]] = None,
         **kwargs
@@ -46,17 +227,16 @@ class GeminiClient:
         Args:
             content: The text content to analyze
             entity_name: Name of the entity to extract information about
+            entity_type: Type of entity ('individual' or 'company')
             fields: List of specific fields to extract (e.g., ['date_of_birth', 'education'])
+            keywords: Optional list of keywords to refine extraction
             **kwargs: Additional parameters for the API call
             
         Returns:
             Dict containing the extracted information
         """
         if not fields:
-            fields = [
-                "date_of_birth", "year_of_birth", "age", "government_issued_unique_identifier(eg: SSN number)", "gender",
-                "educational/professional_background/period", "age_of_father/mother/child","different_status(alive/deceased)","chinese_name/character","full_name","spouse_name","profile/background/employment","ownership_of_entity","business_activity_type","date_of_incorporation", "location", "legal_entity_identifier(LEI)", "nationality","Any date related data about the entity"
-            ]
+            fields = self._get_fields_for_entity_type(entity_type)
         
         # Get current date for age calculations
         from datetime import datetime
@@ -67,10 +247,13 @@ class GeminiClient:
         if keywords:
             keywords_context = f"\n\nUSER SEARCH KEYWORDS: {', '.join(keywords)}\nUse these keywords to help determine if this is the correct person and to extract relevant information."
             
-        prompt = f"""
-        You are an expert information extraction system analyzing web content for a SPECIFIC person.
+        entity_context = "person" if entity_type == "individual" else "company/organization"
         
-        TARGET PERSON: '{entity_name}'
+        prompt = f"""
+        You are an expert information extraction system analyzing web content for a SPECIFIC {entity_context}.
+        
+        TARGET {entity_type.upper()}: '{entity_name}'
+        ENTITY TYPE: {entity_type}
         CURRENT DATE: {current_date}
         CURRENT YEAR: {current_year}{keywords_context}
         
@@ -179,6 +362,15 @@ class GeminiClient:
             article_date = result.get("article_publication_date")
             extraction_notes = result.get("extraction_notes", "")
             
+            # Build field-specific sources - each field that has data gets the source URL
+            field_sources = {}
+            # Get source URL from kwargs if provided, otherwise default to "web"
+            source_url = kwargs.get("source_url", "web")
+            
+            for field_name, field_value in extracted_info.items():
+                if field_value is not None and field_value != "":
+                    field_sources[field_name] = [source_url]
+            
             return {
                 "query_name": entity_name,
                 "detected_entity_name": detected_name,
@@ -187,9 +379,10 @@ class GeminiClient:
                 "name_similarity_score": name_similarity,
                 "keyword_alignment_score": keyword_alignment,
                 "extracted_info": extracted_info,
+                "field_sources": field_sources,  # Sources tied to specific fields
                 "article_publication_date": article_date,
                 "extraction_notes": extraction_notes,
-                "sources": ["web"],
+                "sources": [source_url],
                 "confidence": confidence,
                 "keywords_used": keywords or []
             }
@@ -200,6 +393,7 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "extracted_info": {field: None for field in fields},
+                "field_sources": {},
                 "sources": [],
                 "error": f"Failed to parse response: {str(e)}",
                 "confidence": 0.0
@@ -229,6 +423,7 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "extracted_info": {},
+                "field_sources": {},
                 "sources": [],
                 "confidence": 0.0,
                 "chunks_processed": 0,
@@ -252,6 +447,7 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "extracted_info": {},
+                "field_sources": {},
                 "sources": [],
                 "confidence": 0.0,
                 "chunks_processed": 0,
@@ -266,6 +462,7 @@ class GeminiClient:
             combined = {
                 "entity_name": entity_name,
                 "extracted_info": {},
+                "field_sources": {},
                 "sources": [],
                 "confidence": 0.0,
                 "chunks_processed": 0,
@@ -287,14 +484,25 @@ class GeminiClient:
                         if value is not None and (key not in combined["extracted_info"] or combined["extracted_info"][key] is None):
                             combined["extracted_info"][key] = value
                     
+                    # Merge field-specific sources
+                    if "field_sources" in result:
+                        for field_name, field_sources in result.get("field_sources", {}).items():
+                            if field_name not in combined["field_sources"]:
+                                combined["field_sources"][field_name] = []
+                            combined["field_sources"][field_name].extend(field_sources)
+                    
                     if "sources" in result:
                         combined["sources"].extend([s for s in result["sources"] if s])
                     
                     if "confidence" in result:
                         combined["confidence"] = max(combined["confidence"], result["confidence"])
             
-            # Clean up sources and add some basic error handling
+            # Clean up sources and field sources
             combined["sources"] = list(set(combined["sources"]))
+            
+            # Clean up field sources - remove duplicates for each field
+            for field_name in combined["field_sources"]:
+                combined["field_sources"][field_name] = list(set(combined["field_sources"][field_name]))
             
             # If we have no results but have errors, include them in the response
             if not combined["extracted_info"] and combined["errors"]:
@@ -307,6 +515,7 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "extracted_info": {},
+                "field_sources": {},
                 "sources": [],
                 "confidence": 0.0,
                 "chunks_processed": 0,
@@ -328,6 +537,7 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "extracted_info": {},
+                "field_sources": {},
                 "sources": [],
                 "error": "No search results provided"
             }
@@ -344,6 +554,7 @@ class GeminiClient:
                 return {
                     "entity_name": entity_name,
                     "extracted_info": {},
+                    "field_sources": {},
                     "sources": [],
                     "error": "No valid content found in search results"
                 }
@@ -362,16 +573,18 @@ class GeminiClient:
             return {
                 "entity_name": entity_name,
                 "profiles": [],
+                "field_sources": {},
                 "sources": [],
                 "error": f"Failed to process search results: {str(e)}"
             }
 
-    async def consolidate_clusters(self, entity_name: str, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def consolidate_clusters(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Final LLM pass to combine/segregate profiles into canonical entities.
 
         Args:
             entity_name: The original query name
+            entity_type: Type of entity ('individual' or 'company')
             profiles: List of per-page profiles with keys: detected_entity_name, same_as_input, extracted_info, source_url, confidence
 
         Returns:
@@ -439,7 +652,7 @@ class GeminiClient:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.1,
-                max_tokens=3000,
+                max_tokens=8000,
                 model=self.model,
             )
 
@@ -458,7 +671,15 @@ class GeminiClient:
                 f"Gemini.consolidate_clusters response received | len={len(result_text)} | preview={result_text[:200].replace('\n',' ')}"
             )
             data = json.loads(result_text)
-            entities = data.get("entities", [])
+            
+            # Handle case where LLM returns a list directly instead of {"entities": [...]}
+            if isinstance(data, list):
+                entities = data
+            elif isinstance(data, dict):
+                entities = data.get("entities", [])
+            else:
+                logger.warning(f"Unexpected data type from LLM: {type(data)}")
+                entities = []
             # Basic validation/normalization
             norm_entities = []
             for e in entities:
@@ -487,6 +708,7 @@ class GeminiClient:
         """Wrapper for chat.completions.create with robust retry logic.
         - Handles Gemini 429 with optional RetryInfo retryDelay
         - Retries transient timeouts/connection errors with exponential backoff
+        - Tries all available API keys before giving up
         """
         if not self.client:
             raise RuntimeError("LLM client is not initialized")
@@ -495,6 +717,8 @@ class GeminiClient:
         attempts = 0
         max_attempts = 6
         backoff = 2.0
+        key_rotation_attempts = 0
+        max_key_rotations = len(self.api_key_rotator.keys) * 2  # Try each key twice
 
         while True:
             try:
@@ -506,14 +730,28 @@ class GeminiClient:
                 )
             except RateLimitError as e:
                 attempts += 1
+                # Mark current key as failed and try rotating to next key
+                self.api_key_rotator.mark_key_failed(self.current_api_key, f"Rate limit error: {str(e)}")
+                
+                # Check if we have any available keys left
+                if not self.api_key_rotator.has_available_keys():
+                    logger.error(f"All Gemini API keys exhausted after rate limit errors")
+                    raise
+                
+                self._refresh_client_with_new_key()
+                key_rotation_attempts += 1
+                
+                # If we've tried all keys multiple times, give up
+                if key_rotation_attempts >= max_key_rotations:
+                    logger.error(f"Exhausted all Gemini API keys after {key_rotation_attempts} rotations")
+                    raise
+                
                 retry_sec = self._extract_retry_after_seconds(e)
                 if retry_sec is None:
                     retry_sec = min(30.0, backoff)
                     backoff = min(60.0, backoff * 2)
-                if attempts >= max_attempts:
-                    logger.warning(f"ai.retry_exhausted event=rate_limit attempts={attempts} last_retry_s={retry_sec}")
-                    raise
-                logger.warning(f"ai.rate_limited retry_in_s={retry_sec:.1f} attempt={attempts}/{max_attempts}")
+                    
+                logger.warning(f"ai.rate_limited retry_in_s={retry_sec:.1f} attempt={attempts} key_rotation={key_rotation_attempts}")
                 await asyncio.sleep(retry_sec)
             except (APITimeoutError, APIConnectionError) as e:
                 attempts += 1
@@ -528,15 +766,47 @@ class GeminiClient:
                 status = getattr(e, "status_code", None)
                 if status == 429:
                     attempts += 1
+                    # Mark current key as failed and try rotating to next key
+                    self.api_key_rotator.mark_key_failed(self.current_api_key, f"API Status 429 error: {str(e)}")
+                    
+                    # Check if we have any available keys left
+                    if not self.api_key_rotator.has_available_keys():
+                        logger.error(f"All Gemini API keys exhausted after 429 errors")
+                        raise
+                    
+                    self._refresh_client_with_new_key()
+                    key_rotation_attempts += 1
+                    
+                    # If we've tried all keys multiple times, give up
+                    if key_rotation_attempts >= max_key_rotations:
+                        logger.error(f"Exhausted all Gemini API keys after {key_rotation_attempts} rotations")
+                        raise
+                    
                     retry_sec = self._extract_retry_after_seconds(e)
                     if retry_sec is None:
                         retry_sec = min(30.0, backoff)
                         backoff = min(60.0, backoff * 2)
-                    if attempts >= max_attempts:
-                        logger.warning(f"ai.retry_exhausted event=rate_limit attempts={attempts} last_retry_s={retry_sec}")
-                        raise
-                    logger.warning(f"ai.rate_limited(APIStatus) retry_in_s={retry_sec:.1f} attempt={attempts}/{max_attempts}")
+                    logger.warning(f"ai.rate_limited(APIStatus) retry_in_s={retry_sec:.1f} key_rotation={key_rotation_attempts}")
                     await asyncio.sleep(retry_sec)
+                elif status in [401, 403]:
+                    # Authentication/authorization errors - mark key as failed and rotate
+                    self.api_key_rotator.mark_key_failed(self.current_api_key, f"Auth error {status}: {str(e)}")
+                    
+                    # Check if we have any available keys left
+                    if not self.api_key_rotator.has_available_keys():
+                        logger.error(f"All Gemini API keys exhausted after auth errors")
+                        raise
+                    
+                    self._refresh_client_with_new_key()
+                    key_rotation_attempts += 1
+                    
+                    # If we've tried all keys multiple times, give up
+                    if key_rotation_attempts >= max_key_rotations:
+                        logger.error(f"Exhausted all Gemini API keys after {key_rotation_attempts} rotations")
+                        raise
+                        
+                    await asyncio.sleep(backoff)
+                    backoff = min(60.0, backoff * 2)
                 else:
                     raise
 

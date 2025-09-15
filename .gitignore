@@ -17,6 +17,8 @@ venv
 .google-cookie
 *.log
 *.db
+*.html
+*.txt
 
 # IDE and System files
 .DS_Store

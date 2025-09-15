@@ -31,4 +31,4 @@ class BaseSearchEngine(ABC):
     def clean_url(url: str) -> str:
         """Clean and normalize URLs."""
         # Remove URL parameters, fragments, etc.
-        return url.split('?')[0].split('#')[0].rstrip('/')
+        return url

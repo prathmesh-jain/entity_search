@@ -1,7 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 import uuid
@@ -45,6 +45,7 @@ app.add_middleware(
 
 class SearchRequest(BaseModel):
     entity_name: str = Field(..., description="Name of the entity to research")
+    entity_type: str = Field(..., description="Type of entity: 'individual' or 'company'")
     keywords: Optional[List[str]] = Field(
         None,
         description="Optional list of search keywords to refine the search"
@@ -53,6 +54,12 @@ class SearchRequest(BaseModel):
         None,
         description="Optional list of specific search queries to use"
     )
+    
+    @validator('entity_type')
+    def validate_entity_type(cls, v):
+        if v not in ['individual', 'company']:
+            raise ValueError('entity_type must be either "individual" or "company"')
+        return v
 
 # In-memory storage for research results
 research_results = {}
@@ -69,8 +76,8 @@ def get_research_service():
     global _research_service_instance
     if _research_service_instance is None:
         _research_service_instance = EntityResearchService(
-            max_search_results=10,
-            max_concurrent_requests=8
+            max_search_results=20,
+            max_concurrent_requests=10
         )
     return _research_service_instance
 
@@ -101,6 +108,7 @@ async def research_entity(
         history_db.save_search_start(
             research_id=research_id,
             entity_name=request.entity_name,
+            entity_type=request.entity_type,
             search_queries=request.search_queries,
             keywords=request.keywords
         )
@@ -108,6 +116,7 @@ async def research_entity(
         # Perform the research synchronously
         results = await research_service.research_entity(
             entity_name=request.entity_name,
+            entity_type=request.entity_type,
             search_queries=request.search_queries or None,
             keywords=request.keywords or None
         )
@@ -161,6 +170,7 @@ async def research_entity_async(
             "status": "pending",
             "phase": "starting",
             "entity_name": request.entity_name,
+            "entity_type": request.entity_type,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "results": None,
             "events": []
@@ -170,6 +180,7 @@ async def research_entity_async(
         history_db.save_search_start(
             research_id=research_id,
             entity_name=request.entity_name,
+            entity_type=request.entity_type,
             search_queries=request.search_queries,
             keywords=request.keywords
         )
@@ -178,6 +189,7 @@ async def research_entity_async(
             perform_research,
             research_id,
             request.entity_name,
+            request.entity_type,
             research_service,
             request.keywords or None,
             request.search_queries or None,
@@ -243,6 +255,7 @@ async def get_research_status(
 async def perform_research(
     research_id: str,
     entity_name: str,
+    entity_type: str,
     research_service: EntityResearchService,
     keywords: Optional[List[str]] = None,
     search_queries: Optional[List[str]] = None,
@@ -286,37 +299,38 @@ async def perform_research(
 
         # Heartbeat task to ensure UI gets periodic updates
         heartbeat_running = True
-        async def heartbeat():
-            while heartbeat_running:
-                try:
-                    progress = research_results[research_id].get("progress", {})
-                    events = research_results[research_id].setdefault("events", [])
-                    events.append({
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                        "phase": research_results[research_id].get("phase", "starting"),
-                        "message": "heartbeat"
-                    })
-                    if len(events) > 50:
-                        del events[:-50]
-                except Exception:
-                    pass
-                await asyncio.sleep(10)
+        # async def heartbeat():
+        #     while heartbeat_running:
+        #         try:
+        #             progress = research_results[research_id].get("progress", {})
+        #             events = research_results[research_id].setdefault("events", [])
+        #             events.append({
+        #                 "timestamp": datetime.now(timezone.utc).isoformat(),
+        #                 "phase": research_results[research_id].get("phase", "starting"),
+        #                 "message": "heartbeat"
+        #             })
+        #             if len(events) > 50:
+        #                 del events[:-50]
+        #         except Exception:
+        #             pass
+        #         await asyncio.sleep(10)
 
-        hb_task = asyncio.create_task(heartbeat())
+        # hb_task = asyncio.create_task(heartbeat())
         try:
             # Perform the research with progress callback
             result = await research_service.research_entity(
                 entity_name=entity_name,
+                entity_type=entity_type,
                 search_queries=search_queries,
                 keywords=keywords,
                 progress_callback=progress_callback
             )
         finally:
             heartbeat_running = False
-            try:
-                await asyncio.wait_for(hb_task, timeout=2)
-            except Exception:
-                hb_task.cancel()
+            # try:
+            #     await asyncio.wait_for(hb_task, timeout=2)
+            # except Exception:
+            #     hb_task.cancel()
 
         # Store the results
         research_results[research_id].update({

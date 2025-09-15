@@ -38,7 +38,7 @@ class HistoryDatabase:
                     )
                 """)
                 
-                # Then check if we need to add the full_results column
+                # Then check if we need to add missing columns
                 cursor = conn.execute("PRAGMA table_info(search_history)")
                 columns = [row[1] for row in cursor.fetchall()]
                 
@@ -46,6 +46,11 @@ class HistoryDatabase:
                     # Add the full_results column if it doesn't exist
                     conn.execute("ALTER TABLE search_history ADD COLUMN full_results TEXT")
                     logger.info("Added full_results column to existing search_history table")
+                
+                if 'entity_type' not in columns:
+                    # Add the entity_type column if it doesn't exist
+                    conn.execute("ALTER TABLE search_history ADD COLUMN entity_type TEXT")
+                    logger.info("Added entity_type column to existing search_history table")
                 
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_entity_name ON search_history(entity_name);
@@ -67,6 +72,7 @@ class HistoryDatabase:
             raise
     
     def save_search_start(self, research_id: str, entity_name: str, 
+                         entity_type: str,
                          search_queries: Optional[List[str]] = None,
                          keywords: Optional[List[str]] = None) -> bool:
         """Save the start of a new search to history."""
@@ -74,11 +80,12 @@ class HistoryDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT OR REPLACE INTO search_history 
-                    (research_id, entity_name, search_queries, keywords, status, started_at)
-                    VALUES (?, ?, ?, ?, 'pending', ?)
+                    (research_id, entity_name, entity_type, search_queries, keywords, status, started_at)
+                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
                 """, (
                     research_id,
                     entity_name,
+                    entity_type,
                     json.dumps(search_queries) if search_queries else None,
                     json.dumps(keywords) if keywords else None,
                     datetime.now(timezone.utc).isoformat()

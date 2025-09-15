@@ -4,6 +4,22 @@ from playwright.async_api import async_playwright, Page
 import asyncio
 import aiohttp
 import random
+from bs4 import BeautifulSoup
+
+headers = {
+    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "accept-language": "en-US,en;q=0.9",
+    "cache-control": "max-age=0",
+    "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1"
+}
 
 @dataclass
 class CrawledPage:
@@ -80,49 +96,32 @@ class BaseCrawler:
             
             try:
                 async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=True)
+                    browser = await p.chromium.launch(headless=False)
                     context = await browser.new_context(
                         user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                         viewport={'width': 1920, 'height': 1080},
-                        ignore_https_errors=True
+                        ignore_https_errors=True,
+                        extra_http_headers=headers
                     )
                     page = await context.new_page()
                     
                     try:
                         # Set a timeout for the page load
-                        response = await page.goto(url, timeout=10000, wait_until='domcontentloaded')
+                        response = await page.goto(url,wait_until='domcontentloaded')
                         
                         # Wait for the page to be fully loaded
                         await page.wait_for_selector('body', timeout=30000)
                         
                         # Get page title and HTML content
                         title = await page.title()
-                        html_content = await page.content()
-                        
-                        # Extract main content using DOM cleaning (no scripts, nav, footer, imgs)
-                        content = await page.evaluate('''() => {
-                            const removeSelectors = ['script','style','nav','footer','header','aside','noscript','svg','img','form','iframe','button','input','video','audio','canvas','figure','figcaption'];
-                            const clone = document.body ? document.body.cloneNode(true) : null;
-                            if (!clone) return '';
-                            removeSelectors.forEach(sel => clone.querySelectorAll(sel).forEach(n => n.remove()));
-                            clone.querySelectorAll('[role="navigation"], [role="banner"], [aria-hidden="true"]').forEach(n => n.remove());
-                            const selectors = [
-                                'article', 'main', 'div[role="main"]', '.content', '.main', '.article', '.post', '.entry', '.entry-content',
-                                '.article-content', '.post-content', '.article-body', '.post-body', '.entry-body', '.article-text', '.post-text',
-                                '#content', '#main', '#article', '#post', '#entry', '#article-content', '#post-content', '#main-content', '#content-main'
-                            ];
-                            let text = '';
-                            for (const sel of selectors) {
-                                const el = clone.querySelector(sel);
-                                if (el) {
-                                    text = el.innerText || '';
-                                    if (text && text.trim().length > 200) break;
-                                }
-                            }
-                            if (!text) text = clone.innerText || '';
-                            return text.replace(/\s+/g, ' ').trim();
-                        }''')
-                        
+
+                        content=await page.content()
+                        soup = BeautifulSoup(content, "html.parser")
+
+                        # Remove unwanted tags
+                        for tag in soup(["script", "style", "noscript", "img", "svg"]):tag.decompose()
+
+                        content = soup.get_text(separator="\n", strip=True)
                         return CrawledPage(
                             url=url,
                             title=title,

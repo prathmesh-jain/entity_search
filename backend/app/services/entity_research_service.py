@@ -34,14 +34,17 @@ class EntityResearchService:
         self.llm_client = GeminiClient()
         self.logger = logging.getLogger(__name__)
     
-    async def research_entity(self, entity_name: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None) -> Dict[str, Any]:
+    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None) -> Dict[str, Any]:
         """
         Research an entity by searching the web and analyzing the results.
         
         Args:
             entity_name: Name of the entity to research
+            entity_type: Type of entity ('individual' or 'company')
             search_queries: Optional list of search queries to use. If not provided,
                           will generate queries based on the entity name.
+            keywords: Optional list of keywords to refine the search
+            progress_callback: Optional callback function for progress updates
                           
         Returns:
             Dictionary containing research results
@@ -50,7 +53,7 @@ class EntityResearchService:
         try:
             # Generate search queries if not provided
             if not search_queries:
-                search_queries = self._generate_search_queries(entity_name, keywords=keywords)
+                search_queries = await self._generate_search_queries(entity_name, entity_type, keywords=keywords)
             
             self.logger.info(f"Generated search queries: {search_queries}")
             
@@ -78,11 +81,17 @@ class EntityResearchService:
             clusters: Dict[str, List[Dict[str, Any]]] = {"query_name": [], "uncertain": []}
             per_field_sources: Dict[str, set] = {}
             sources_meta: List[Dict[str, Any]] = []
+            source_url_to_id: Dict[str, int] = {}  # Map URLs to source IDs
             
             async for page in self.crawler.crawl_stream(urls):
                 pages_crawled += 1
-                # Record source meta
+                # Assign source ID based on order
+                source_id = len(sources_meta) + 1
+                source_url_to_id[page.url] = source_id
+                
+                # Record source meta with ID
                 sources_meta.append({
+                    "source_id": source_id,
                     "url": page.url,
                     "title": page.title,
                     "status_code": page.status_code,
@@ -98,6 +107,7 @@ class EntityResearchService:
                             self.llm_client.extract_entity_info(
                                 content=page.content,
                                 entity_name=entity_name,
+                                entity_type=entity_type,
                                 keywords=keywords
                             ),
                             timeout=20
@@ -121,10 +131,10 @@ class EntityResearchService:
                             clusters.setdefault(detected, []).append(profile)
                         else:
                             clusters.setdefault("uncertain", []).append(profile)
-                        # Per-field sources attribution
+                        # Per-field sources attribution with source IDs
                         for field, value in (llm_result.get("extracted_info") or {}).items():
                             if value is not None and value != "":
-                                per_field_sources.setdefault(field, set()).add(page.url)
+                                per_field_sources.setdefault(field, set()).add(source_id)
                         
                         if progress_callback:
                             progress_callback(phase="analyzing", payload={
@@ -164,7 +174,7 @@ class EntityResearchService:
             self.logger.info(f"Starting final consolidation | mode={'LLM' if use_llm_combine else 'LOCAL'} | profiles={len(profiles)}")
 
             if not use_llm_combine:
-                final_entities = {"entities": self._local_consolidate(entity_name, profiles)}
+                final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
                 self.logger.info("Local consolidation completed")
                 if progress_callback:
                     progress_callback(phase="combining", payload={
@@ -175,29 +185,67 @@ class EntityResearchService:
                 try:
                     if len(profiles) > 20:
                         # Use chunking strategy for large profile sets
-                        final_entities = await self._chunked_consolidation(entity_name, profiles)
+                        final_entities = await self._chunked_consolidation(entity_name, entity_type, profiles, source_url_to_id)
                     else:
                         # Direct consolidation for smaller sets
-                        final_entities = await self.llm_client.consolidate_clusters(entity_name, profiles)
+                        final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
                 
                     self.logger.info("Final consolidation completed (LLM)")
                     if not final_entities or not final_entities.get("entities"):
                         self.logger.info("LLM consolidation returned empty; using local consolidation fallback")
-                        final_entities = {"entities": self._local_consolidate(entity_name, profiles)}
+                        final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
                 except Exception as e:
                     self.logger.error(f"LLM consolidation failed: {e}")
                     self.logger.info("Using local consolidation fallback due to LLM error")
-                    final_entities = {"entities": self._local_consolidate(entity_name, profiles)}
+                    final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
             
             # Prepare the final result
             # Include final entities produced by combine pass
+            # Filter out null/empty values from clusters before sending to frontend
+            filtered_clusters = {}
+            for cluster_name, cluster_profiles in clusters.items():
+                filtered_profiles = []
+                for profile in cluster_profiles:
+                    # Filter extracted_info to remove null/empty values
+                    if 'extracted_info' in profile:
+                        filtered_info = {
+                            k: v for k, v in profile['extracted_info'].items() 
+                            if v is not None and v != "" and v != [] and v != {}
+                        }
+                        if filtered_info:  # Only include profile if it has meaningful data
+                            filtered_profile = profile.copy()
+                            filtered_profile['extracted_info'] = filtered_info
+                            filtered_profiles.append(filtered_profile)
+                    elif any(v for k, v in profile.items() if k != 'extracted_info' and v is not None and v != ""):
+                        # Include profile if it has other meaningful data
+                        filtered_profiles.append(profile)
+                
+                if filtered_profiles:  # Only include cluster if it has profiles with data
+                    filtered_clusters[cluster_name] = filtered_profiles
+            
+            # Filter profiles to remove null/empty values
+            filtered_profiles = []
+            for profile in profiles:
+                if 'extracted_info' in profile:
+                    filtered_info = {
+                        k: v for k, v in profile['extracted_info'].items() 
+                        if v is not None and v != "" and v != [] and v != {}
+                    }
+                    if filtered_info:  # Only include profile if it has meaningful data
+                        filtered_profile = profile.copy()
+                        filtered_profile['extracted_info'] = filtered_info
+                        filtered_profiles.append(filtered_profile)
+                elif any(v for k, v in profile.items() if k != 'extracted_info' and v is not None and v != ""):
+                    # Include profile if it has other meaningful data
+                    filtered_profiles.append(profile)
+
             result = {
                 'entity_name': entity_name,
                 'search_queries': search_queries,
                 'search_results_count': len(search_results),
                 'crawled_pages_count': pages_crawled,
-                'clusters': clusters,
-                'profiles': profiles,
+                'clusters': filtered_clusters,
+                'profiles': filtered_profiles,
                 'final_entities': final_entities,
                 'per_field_sources': {k: sorted(list(v)) for k, v in per_field_sources.items()},
                 'sources': sources_meta
@@ -227,41 +275,45 @@ class EntityResearchService:
             'sources': []
         }
 
-    def _generate_search_queries(self, entity_name: str, keywords: Optional[List[str]] = None) -> List[str]:
+    async def _generate_search_queries(self, entity_name: str, entity_type: str, keywords: Optional[List[str]] = None) -> List[str]:
         """Generate search queries for the given entity name and optional keywords.
         
         Args:
             entity_name: Name of the entity to research
+            entity_type: Type of entity ('individual' or 'company')
             keywords: Optional list of keywords to include in the search queries
             
         Returns:
             List of search query strings
         """
-        # base_queries = [
-        #     f"{entity_name} biography",
-        #     f"{entity_name} date of birth",
-        #     f"{entity_name} education",
-        #     f"{entity_name} professional background",
-        #     f"{entity_name} family",
-        #     f"{entity_name} spouse",
-        #     f"{entity_name} location",
-        #     f"{entity_name} company"
-        # ]
+        # Check if LLM query generation is enabled
+        use_llm_generation = os.getenv("LLM_QUERY_GENERATION", "false").lower() == "true"
+        print("use_llm_generation", use_llm_generation)
         
-        # # Add entity-specific queries
-        # if len(entity_name.split()) > 1:  # Likely a person's name
-        #     base_queries.extend([
-        #         f"{entity_name} age",
-        #         f"{entity_name} parents",
-        #         f"{entity_name} children"
-        #     ])
-        # else:  # Likely a company/organization
-        #     base_queries.extend([
-        #         f"{entity_name} incorporation date",
-        #         f"{entity_name} ownership",
-        #         f"{entity_name} founders"
-        #     ])
+        if use_llm_generation:
+            try:
+                self.logger.info("Using LLM-based query generation")
+                llm_queries = await self.llm_client.generate_search_queries(
+                    entity_name=entity_name,
+                    entity_type=entity_type,
+                    keywords=keywords,
+                    num_queries=4
+                )
+                if llm_queries:
+                    return llm_queries
+                else:
+                    self.logger.warning("LLM query generation returned empty, falling back to traditional method")
+            except Exception as e:
+                self.logger.error(f"LLM query generation failed: {e}, falling back to traditional method")
+        
+        # Traditional query generation (fallback or when LLM is disabled)
+        self.logger.info("Using traditional query generation")
+        return self._generate_traditional_queries(entity_name, entity_type, keywords)
+    
+    def _generate_traditional_queries(self, entity_name: str, entity_type: str, keywords: Optional[List[str]] = None) -> List[str]:
+        """Generate traditional search queries without LLM."""
         base_queries = []
+        
         # Add keyword-enhanced queries if keywords are provided
         if keywords and isinstance(keywords, list):
             keyword_queries = []
@@ -270,12 +322,28 @@ class EntityResearchService:
                     keyword = keyword.strip()
                     keyword_queries.extend([
                         f"{entity_name} {keyword}",
-                        # f"{entity_name} {keyword} biography",
-                        # f"{entity_name} {keyword} profile"
                     ])
             base_queries.extend(keyword_queries)
+        
+        # Add entity-type specific queries
+        # if entity_type == "individual":
+        #     base_queries.extend([
+        #         f'"{entity_name}" biography',
+        #         f'"{entity_name}" profile background',
+        #         f'"{entity_name}" news recent'
+        #     ])
+        # else:  # company
+        #     base_queries.extend([
+        #         f'"{entity_name}" company information',
+        #         f'"{entity_name}" business registration',
+        #         f'"{entity_name}" executives leadership'
+        #     ])
+        
+        # Ensure we have at least the entity name as a query
+        if not base_queries:
+            base_queries = [entity_name]
             
-        return base_queries
+        return base_queries[:4]  # Limit to 4 queries
     
     async def _search_all_engines(self, entity_name: str, queries: List[str]) -> List[Dict]:
         """
@@ -360,6 +428,7 @@ class EntityResearchService:
                 self.logger.error(f"Unexpected error processing search task: {str(e)}", exc_info=True)
         
         self.logger.info(f"Search completed. Found {len(all_results)} unique results from {completed} search tasks")
+        self.logger.info(f"All search results: {all_results}")
         return all_results
     
     def _is_crawlable_url(self, url: str) -> bool:
@@ -395,8 +464,8 @@ class EntityResearchService:
             
             # Other non-crawlable or problematic sites
             'google.com/search', 'bing.com/search', 'yahoo.com/search',
-            'amazon.com/dp/', 'amazon.com/gp/', 'ebay.com/itm/',
-            'paywall', 'subscription', 'login', 'signin', 'register'
+            'amazon.com', 'amazon.com/gp/', 'ebay.com/itm/','amazon',
+            'paywall', 'subscription', 'login', 'signin', 'register','/question'
         ]
         
         # Check if URL contains any blocked patterns
@@ -506,7 +575,7 @@ class EntityResearchService:
         # Process with LLM
         return await self.llm_client.process_search_results(entity_name, search_results)
 
-    def _local_consolidate(self, entity_name: str, profiles: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _local_consolidate(self, entity_name: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> List[Dict[str, Any]]:
         """Deterministic, fast consolidation when LLM combine is disabled/unavailable.
 
         Strategy:
@@ -569,12 +638,32 @@ class EntityResearchService:
             if not combined_fields or len(combined_fields) == 0:
                 continue
                 
+            # Build field-specific sources mapping with source IDs
+            field_sources = {}
+            member_indexes = index_map.get(k, [])
+            
+            for field_name, field_value in combined_fields.items():
+                if field_value is not None and field_value != "":
+                    # Find source IDs for this specific field from member profiles
+                    field_source_ids = set()
+                    for idx in member_indexes:
+                        if idx < len(profiles):
+                            profile = profiles[idx]
+                            extracted_info = profile.get("extracted_info", {})
+                            if field_name in extracted_info and extracted_info[field_name] == field_value:
+                                source_url = profile.get("source_url")
+                                if source_url and source_url in source_url_to_id:
+                                    field_source_ids.add(source_url_to_id[source_url])
+                    
+                    field_sources[field_name] = sorted(list(field_source_ids))
+            
             entities.append({
                 "canonical_name": data["canonical_name"] or (entity_name if k == '__query__' else None),
                 "same_as_query": data["same_as_query"],
                 "combined_fields": combined_fields,
-                "member_profile_indexes": index_map.get(k, []),
-                "sources": [profiles[i].get("source_url", "") for i in index_map.get(k, []) if profiles[i].get("source_url")]
+                "field_sources": field_sources,  # Sources tied to specific fields
+                "member_profile_indexes": member_indexes,
+                "sources": [profiles[i].get("source_url", "") for i in member_indexes if i < len(profiles) and profiles[i].get("source_url")]
             })
 
         # Sort entities by fuzzy matching similarity to query name
@@ -591,7 +680,7 @@ class EntityResearchService:
         
         return sorted(entities, key=similarity_score, reverse=True)
 
-    async def _chunked_consolidation(self, entity_name: str, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _chunked_consolidation(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> Dict[str, Any]:
         """Consolidate large profile sets using chunking strategy."""
         chunk_size = 15  # Process 15 profiles at a time
         chunks = [profiles[i:i + chunk_size] for i in range(0, len(profiles), chunk_size)]
@@ -604,13 +693,13 @@ class EntityResearchService:
         for i, chunk in enumerate(chunks):
             self.logger.info(f"Processing chunk {i+1}/{len(chunks)} with {len(chunk)} profiles")
             try:
-                chunk_result = await self.llm_client.consolidate_clusters(entity_name, chunk)
+                chunk_result = await self.llm_client.consolidate_clusters(entity_name, entity_type, chunk)
                 if chunk_result and chunk_result.get("entities"):
                     consolidated_entities.extend(chunk_result["entities"])
             except Exception as e:
                 self.logger.warning(f"Chunk {i+1} consolidation failed: {e}, using local fallback")
                 # Fallback to local consolidation for this chunk
-                local_entities = self._local_consolidate(entity_name, chunk)
+                local_entities = self._local_consolidate(entity_name, chunk, source_url_to_id)
                 consolidated_entities.extend(local_entities)
         
         # If we have multiple chunks, do a final consolidation pass on the results
@@ -628,7 +717,7 @@ class EntityResearchService:
                         "source_url": f"consolidated_chunk_{idx}"
                     })
                 
-                final_result = await self.llm_client.consolidate_clusters(entity_name, final_profiles)
+                final_result = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
                 if final_result and final_result.get("entities"):
                     return final_result
             except Exception as e:

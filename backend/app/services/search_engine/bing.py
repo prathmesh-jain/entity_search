@@ -5,6 +5,7 @@ from typing import List, Optional, Dict, Any
 import httpx
 import os
 import time
+from playwright.async_api import async_playwright
 
 from .base import BaseSearchEngine, SearchResult
 
@@ -12,7 +13,7 @@ from .base import BaseSearchEngine, SearchResult
 logger = logging.getLogger(__name__)
 
 class BingSearchEngine(BaseSearchEngine):
-    """Bing search engine implementation using SerpApi."""
+    """Bing search engine implementation supporting both SerpApi and Playwright methods."""
     
     def __init__(self, max_retries: int = 3, request_delay: float = 2.0):
         """
@@ -29,6 +30,10 @@ class BingSearchEngine(BaseSearchEngine):
         self.last_request_time = 0
         self.results_per_page = 10
         self.max_pages = 5  # kept for compatibility, SerpApi supports num param
+        
+        # Check which method to use based on environment variable
+        self.use_serp_api = os.getenv("USE_SERP_API_FOR_BING", "false").lower() == "true"
+        logger.info(f"Bing search engine initialized with {'SerpAPI' if self.use_serp_api else 'Playwright'} method")
     
     async def _enforce_rate_limit(self):
         """Enforce rate limiting by waiting if needed."""
@@ -83,6 +88,13 @@ class BingSearchEngine(BaseSearchEngine):
         Returns:
             List of SearchResult objects
         """
+        if self.use_serp_api:
+            return await self._search_with_serpapi(query, max_results)
+        else:
+            return await self._search_with_playwright(query, max_results)
+
+    async def _search_with_serpapi(self, query: str, max_results: int = 10) -> List[SearchResult]:
+        """Search using SerpAPI method."""
         logger.info(f"Searching Bing via SerpApi for: {query} (max {max_results} results)")
         results: List[SearchResult] = []
         seen = set()
@@ -117,12 +129,11 @@ class BingSearchEngine(BaseSearchEngine):
                     if not link or not isinstance(link, str):
                         continue
                         
-                    clean = self.clean_url(link)
-                    if not clean or clean in seen:
+                    if link in seen:
                         continue
                         
-                    seen.add(clean)
-                    results.append(SearchResult(url=clean, source='bing'))
+                    seen.add(link)
+                    results.append(SearchResult(url=link, source='bing'))
                     
                     if len(results) >= max_results:
                         break
@@ -141,6 +152,135 @@ class BingSearchEngine(BaseSearchEngine):
                     break
         
         logger.info(f"Found {len(results)} results from Bing (SerpApi) for: {query}")
+        return results
+
+    async def _search_with_playwright(self, query: str, max_results: int = 10) -> List[SearchResult]:
+        """Search using Playwright method."""
+        logger.info(f"Searching Bing via Playwright for: {query} (max {max_results} results)")
+        results: List[SearchResult] = []
+        seen = set()
+        
+        headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "accept-encoding": "gzip, deflate, br, zstd",
+            "accept-language": "en-US,en;q=0.9",
+            "cache-control": "max-age=0",
+            "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            "upgrade-insecure-requests": "1"
+        }
+        
+        page = 1
+        results_per_page = 10
+        
+        while len(results) < max_results:
+            # Create fresh browser instance for each page to avoid detection
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--no-sandbox',
+                        '--disable-blink-features=AutomationControlled',
+                        '--disable-web-security',
+                        '--disable-features=VizDisplayCompositor'
+                    ]
+                )
+                
+                # Create new context with randomized properties
+                context = await browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    viewport={"width": 1366 + random.randint(-100, 100), "height": 768 + random.randint(-50, 50)},
+                    ignore_https_errors=True,
+                    extra_http_headers=headers
+                )
+                
+                try:
+                    page_obj = await context.new_page()
+                    
+                    # Remove automation indicators
+                    await page_obj.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {
+                            get: () => undefined,
+                        });
+                        
+                        window.chrome = {
+                            runtime: {},
+                        };
+                        
+                        Object.defineProperty(navigator, 'plugins', {
+                            get: () => [1, 2, 3, 4, 5],
+                        });
+                        
+                        Object.defineProperty(navigator, 'languages', {
+                            get: () => ['en-US', 'en'],
+                        });
+                    """)
+                    
+                    remaining = max_results - len(results)
+                    first = (page - 1) * results_per_page + 1
+                    url = f"https://www.bing.com/search?q={query}&first={first}"
+                    
+                    logger.debug(f"Making Bing Playwright request: page={page}, first={first}, remaining={remaining}")
+                    
+                    # Navigate with random delay
+                    await asyncio.sleep(random.uniform(2, 4))
+                    await page_obj.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    
+                    # Random mouse movement to simulate human behavior
+                    await page_obj.mouse.move(random.randint(100, 500), random.randint(100, 400))
+                    await asyncio.sleep(random.uniform(1, 2))
+                    
+                    try:
+                        await page_obj.wait_for_selector("li.b_algo h2 a", timeout=10000)
+                    except:
+                        logger.warning(f"Timeout waiting for results on page {page}")
+                        break
+                    
+                    elements = await page_obj.query_selector_all("li.b_algo h2 a")
+                    
+                    if not elements:
+                        logger.info(f"No more results found on page {page}")
+                        break
+                    
+                    page_results = []
+                    for element in elements:
+                        try:
+                            link = await element.get_attribute("href")
+                            if link and isinstance(link, str):
+                                # Don't clean URL for Bing results to preserve uniqueness
+                                if link not in seen:
+                                    seen.add(link)
+                                    page_results.append(SearchResult(url=link, source='bing'))
+                                    
+                                    if len(results) + len(page_results) >= max_results:
+                                        break
+                        except Exception as e:
+                            logger.debug(f"Error extracting link from element: {e}")
+                            continue
+                    
+                    results.extend(page_results)
+                    logger.debug(f"Found {len(page_results)} results on page {page}")
+                    
+                    # If we got fewer results than expected, we've reached the end
+                    if len(page_results) < results_per_page:
+                        logger.info(f"Received fewer results ({len(page_results)}) than expected, stopping pagination")
+                        break
+                    
+                    page += 1
+                    
+                finally:
+                    await browser.close()
+                
+                # Longer delay between pages to avoid detection
+                if len(results) < max_results:
+                    await asyncio.sleep(random.uniform(8, 15))
+        
+        logger.info(f"Found {len(results)} results from Bing (Playwright) for: {query}")
         return results
 
     # No HTML parsing required when using SerpApi

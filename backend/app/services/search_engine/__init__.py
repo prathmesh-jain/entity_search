@@ -1,6 +1,6 @@
 from .google import GoogleSearchEngine
 from .bing import BingSearchEngine
-# from .yahoo import YahooSearchEngine
+from .yahoo import YahooSearchEngine
 from .base import BaseSearchEngine, SearchResult
 from typing import List, Dict, Type
 
@@ -10,7 +10,7 @@ class SearchEngineFactory:
     _engines = {
         'google': GoogleSearchEngine,
         'bing': BingSearchEngine,
-        # 'yahoo': YahooSearchEngine
+        'yahoo': YahooSearchEngine
     }
     
     @classmethod

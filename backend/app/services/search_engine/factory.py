@@ -5,16 +5,16 @@ from typing import Dict, Type
 from .base import BaseSearchEngine
 from .google import GoogleSearchEngine
 from .bing import BingSearchEngine
-# from .yahoo import YahooSearchEngine
+from .yahoo import YahooSearchEngine
 
 class SearchEngineFactory:
     """Factory class for creating search engine instances."""
     
     # Map of search engine names to their corresponding classes
     _engines: Dict[str, Type[BaseSearchEngine]] = {
-        'google': GoogleSearchEngine,
+        # 'google': GoogleSearchEngine,
         'bing': BingSearchEngine,
-        # 'yahoo': YahooSearchEngine,
+        'yahoo': YahooSearchEngine,
     }
     
     @classmethod

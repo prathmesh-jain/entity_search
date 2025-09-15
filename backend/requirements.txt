@@ -8,3 +8,4 @@ openai
 aiohttp
 httpx
 lxml
+beautifulsoup4
