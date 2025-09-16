@@ -352,7 +352,7 @@ const History = () => {
                         <div className="space-y-1">
                           <div>Sources: {search.total_sources || 0}</div>
                           <div>Entities: {search.entities_found || 0}</div>
-                          <div>Pages: {search.crawled_pages || 0}</div>
+                          {/* <div>Pages: {search.crawled_pages || 0}</div> */}
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-3">

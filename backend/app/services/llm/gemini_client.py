@@ -123,7 +123,7 @@ class GeminiClient:
             )
             
             if not response or not response.choices:
-                logger.warning("Empty response from LLM query generation")
+                logger.warning("Empty response from LLM query generation - API keys may be exhausted")
                 return self._fallback_queries(entity_name, entity_type, keywords)
             
             content = response.choices[0].message.content
@@ -336,6 +336,17 @@ class GeminiClient:
                 max_tokens=8000,
                 model=self.model,
             )
+            
+            if not response or not response.choices:
+                logger.warning("Empty response from LLM extraction - API keys may be exhausted")
+                return {
+                    "entity_name": entity_name,
+                    "extracted_info": {field: None for field in fields},
+                    "field_sources": {},
+                    "sources": [],
+                    "error": "LLM API unavailable - all keys exhausted",
+                    "confidence": 0.0
+                }
             
             # Extract the JSON response
             result_text = response.choices[0].message.content
@@ -736,7 +747,8 @@ class GeminiClient:
                 # Check if we have any available keys left
                 if not self.api_key_rotator.has_available_keys():
                     logger.error(f"All Gemini API keys exhausted after rate limit errors")
-                    raise
+                    # Return None to indicate failure - let calling code handle graceful degradation
+                    return None
                 
                 self._refresh_client_with_new_key()
                 key_rotation_attempts += 1
@@ -752,7 +764,7 @@ class GeminiClient:
                     backoff = min(60.0, backoff * 2)
                     
                 logger.warning(f"ai.rate_limited retry_in_s={retry_sec:.1f} attempt={attempts} key_rotation={key_rotation_attempts}")
-                await asyncio.sleep(retry_sec)
+                await asyncio.wait_for(asyncio.sleep(retry_sec), timeout=min(retry_sec + 5.0, 35.0))
             except (APITimeoutError, APIConnectionError) as e:
                 attempts += 1
                 delay = min(10.0, backoff)
@@ -761,7 +773,7 @@ class GeminiClient:
                     logger.warning(f"ai.retry_exhausted event=transient_error attempts={attempts} last_error={e}")
                     raise
                 logger.warning(f"ai.transient_error retry_in_s={delay:.1f} attempt={attempts}/{max_attempts} error={e}")
-                await asyncio.sleep(delay)
+                await asyncio.wait_for(asyncio.sleep(delay), timeout=min(delay + 2.0, 12.0))
             except APIStatusError as e:
                 status = getattr(e, "status_code", None)
                 if status == 429:
@@ -772,7 +784,8 @@ class GeminiClient:
                     # Check if we have any available keys left
                     if not self.api_key_rotator.has_available_keys():
                         logger.error(f"All Gemini API keys exhausted after 429 errors")
-                        raise
+                        # Return None to indicate failure - let calling code handle graceful degradation
+                        return None
                     
                     self._refresh_client_with_new_key()
                     key_rotation_attempts += 1
@@ -787,7 +800,7 @@ class GeminiClient:
                         retry_sec = min(30.0, backoff)
                         backoff = min(60.0, backoff * 2)
                     logger.warning(f"ai.rate_limited(APIStatus) retry_in_s={retry_sec:.1f} key_rotation={key_rotation_attempts}")
-                    await asyncio.sleep(retry_sec)
+                    await asyncio.wait_for(asyncio.sleep(retry_sec), timeout=min(retry_sec + 5.0, 35.0))
                 elif status in [401, 403]:
                     # Authentication/authorization errors - mark key as failed and rotate
                     self.api_key_rotator.mark_key_failed(self.current_api_key, f"Auth error {status}: {str(e)}")
@@ -795,7 +808,8 @@ class GeminiClient:
                     # Check if we have any available keys left
                     if not self.api_key_rotator.has_available_keys():
                         logger.error(f"All Gemini API keys exhausted after auth errors")
-                        raise
+                        # Return None to indicate failure - let calling code handle graceful degradation
+                        return None
                     
                     self._refresh_client_with_new_key()
                     key_rotation_attempts += 1
@@ -805,7 +819,7 @@ class GeminiClient:
                         logger.error(f"Exhausted all Gemini API keys after {key_rotation_attempts} rotations")
                         raise
                         
-                    await asyncio.sleep(backoff)
+                    await asyncio.wait_for(asyncio.sleep(backoff), timeout=min(backoff + 5.0, 65.0))
                     backoff = min(60.0, backoff * 2)
                 else:
                     raise

@@ -4,7 +4,9 @@ const DeleteModal = ({ isOpen, onClose, onConfirm, entityName, isLoading = false
   if (!isOpen) return null;
 
   const handleBackdropClick = (e) => {
-    if (e.target === e.currentTarget) {
+    console.log(e.target, e.currentTarget.children[0]);
+    
+    if (e.target === e.currentTarget.children[0]) {
       onClose();
     }
   };
@@ -16,7 +18,7 @@ const DeleteModal = ({ isOpen, onClose, onConfirm, entityName, isLoading = false
         onClick={handleBackdropClick}
       >
         {/* Background overlay */}
-        <div className="fixed inset-0 bg-black bg-opacity-50 transition-opacity"></div>
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-xs transition-opacity"></div>
 
         {/* Modal panel */}
         <div className="relative inline-block align-middle bg-white rounded-lg px-4 pt-5 pb-4 text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:max-w-lg sm:w-full sm:p-6 z-10">

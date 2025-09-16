@@ -4,7 +4,11 @@ from undetected_playwright import Malenia
 from playwright_stealth import Stealth
 import asyncio
 
-url="https://siestasand.us/smith-throws-hat-in-the-ring-for-county-commission-race/"
+url="https://floridapolitics.com/archives/678406-sarasota-county-defunds-child-care-program-after-cutting-united-way-ties-over-abortion/"
+# listofurl=[
+#     {'url': 'https://www.scgov.net/government/county-commission-bcc/district-2-mark-smith', 'source': 'yahoo'}, 
+# {'url': 'https://siestasand.us/smith-throws-hat-in-the-ring-for-county-commission-race/', 'source': 'yahoo'}, 
+# {'url': 'https://sarasotanewsleader.com/mark-smith-files-as-republican-for-county-commission-district-2-seat/', 'source': 'yahoo'}, {'url': 'https://www.mysuncoast.com/2022/11/22/2-newly-elected-sarasota-county-commissioners-sworn-tuesday/', 'source': 'yahoo'}, {'url': 'https://www.sarasotagop.com/elected-officials', 'source': 'yahoo'}, {'url': 'https://www.sarasotagop.com/copy-of-sarasota-county-commissioner', 'source': 'yahoo'}, {'url': 'https://www.scgov.net/government/elected-officials/', 'source': 'yahoo'}, {'url': 'https://patch.com/florida/sarasota/sarasota-county-commission-election-2-seats-open-board', 'source': 'yahoo'}]
 
 headers = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -22,7 +26,7 @@ headers = {
 }
 
 
-async def main():
+async def main(url,index):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=False)
         context = await browser.new_context(
@@ -46,8 +50,9 @@ async def main():
             
         # Get page title and HTML content
         title = await page.title()
+        print(title)
         content=await page.content()
-        with open("content.html", "w", encoding="utf-8") as f:
+        with open(f"content{index}.html", "w", encoding="utf-8") as f:
             f.write(content)
         soup = BeautifulSoup(content, "html.parser")
 
@@ -57,8 +62,19 @@ async def main():
 
         text = soup.get_text(separator="\n", strip=True)
 
-        with open("content.txt", "w", encoding="utf-8") as f:
+        with open(f"content{index}.txt", "w", encoding="utf-8") as f:
             f.write(text)
         await browser.close()
+    return True
+async def run():
+    tasks = []
+    for index, url in enumerate(listofurl):
+        task = asyncio.create_task(main(url, index))
+        tasks.append(task)
+    
+    # Wait for all tasks to complete
+    results = await asyncio.gather(*tasks)
+    print("All tasks are done!")
+    return True
 
-asyncio.run(main())
+asyncio.run(main(url, 0))

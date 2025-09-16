@@ -32,94 +32,97 @@ class GoogleSearchEngine(BaseSearchEngine):
     
     async def _enforce_rate_limit(self):
         """Enforce rate limiting by waiting if needed."""
+        logger.debug("_enforce_rate_limit: START")
         current_time = time.time()
         time_since_last = current_time - self.last_request_time
         if time_since_last < self.request_delay:
-            wait_time = self.request_delay - time_since_last + random.uniform(0.5, 1.5)
-            await asyncio.sleep(wait_time)
+            wait_time = min(2.0, self.request_delay - time_since_last + random.uniform(0.1, 0.5))  # Cap at 2 seconds
+            logger.debug(f"_enforce_rate_limit: waiting {wait_time:.2f}s")
+            await asyncio.wait_for(asyncio.sleep(wait_time), timeout=3.0)
         self.last_request_time = time.time()
+        logger.debug("_enforce_rate_limit: END")
 
     async def _google_api_search(self, client: httpx.AsyncClient, query: str, num: int, start: int = 1) -> Optional[Dict[str, Any]]:
         """Make request to Google Custom Search API with proper key rotation."""
-        api_key = self.api_key_rotator.get_current_key()
         cx = os.getenv("GOOGLE_CX")
         
-        if not api_key or not cx:
-            logger.error("GOOGLE_API_KEY or GOOGLE_CX is not set in environment")
+        if not cx:
+            logger.error("GOOGLE_CX is not set in environment")
             return None
+        
+        # Try all available API keys before giving up
+        max_key_attempts = len(self.api_key_rotator.keys)
+        
+        for key_attempt in range(max_key_attempts):
+            api_key = self.api_key_rotator.get_current_key()
             
-        params = {
-            'key': api_key,
-            'cx': cx,
-            'q': query,
-            'num': 10,  # Google API max 100 per request
-            'start': start,
-        }
-        
-        key_rotation_attempts = 0
-        max_key_rotations = len(self.api_key_rotator.keys) * 2  # Try each key twice
-        
-        for attempt in range(self.max_retries + 1):
-            try:
-                await self._enforce_rate_limit()
-                logger.info(f"Google Custom Search API (attempt {attempt+1}) for: {query} num={params['num']} start={start}")
+            if not api_key:
+                logger.error("No available Google API keys")
+                return None
                 
-                resp = await client.get(self.base_url, params=params, timeout=30.0)
+            params = {
+                'key': api_key,
+                'cx': cx,
+                'q': query,
+                'num': 10,
+                'start': start,
+            }
+            
+            try:
+                logger.debug(f"Trying Google API key {key_attempt + 1}/{max_key_attempts}")
+                await asyncio.wait_for(self._enforce_rate_limit(), timeout=5.0)
+                
+                resp = await client.get(self.base_url, params=params, timeout=10.0)
+                logger.debug(f"API response received: {resp.status_code}")
                 
                 if resp.status_code == 200:
+                    logger.debug("Success response, returning JSON")
                     return resp.json()
                 elif resp.status_code == 429:
-                    # Rate limited - mark key as failed and rotate
+                    # Rate limited - mark key as failed and try next key
+                    logger.debug("Rate limit detected, marking key as failed")
                     self.api_key_rotator.mark_key_failed(api_key, f"Rate limit error 429")
+                    logger.warning(f"Google API rate limited on key {key_attempt + 1}, trying next key")
                     
-                    # Check if we have any available keys left
+                    # Check if we have more keys to try
                     if not self.api_key_rotator.has_available_keys():
-                        logger.error(f"All Google API keys exhausted after rate limit errors")
+                        logger.error("All Google API keys are rate limited")
                         return None
-                    
-                    key_rotation_attempts += 1
-                    if key_rotation_attempts >= max_key_rotations:
-                        logger.error(f"Exhausted all Google API keys after {key_rotation_attempts} rotations")
-                        return None
-                    
-                    retry_after = int(resp.headers.get('Retry-After', 0)) or int(20 + random.uniform(0, 10))
-                    logger.warning(f"Google API rate limited. Rotating key and retrying in {retry_after}s (rotation {key_rotation_attempts})")
-                    await asyncio.sleep(retry_after)
-                    
-                    # Get new key for next attempt
-                    api_key = self.api_key_rotator.get_current_key()
-                    if api_key:
-                        params['key'] = api_key
                     continue
+                    
                 elif resp.status_code in [401, 403]:
-                    # Authentication/authorization errors - mark key as failed and rotate
+                    # Auth errors - mark key as failed and try next key
+                    logger.debug(f"Auth error {resp.status_code}, marking key as failed")
                     self.api_key_rotator.mark_key_failed(api_key, f"Auth error {resp.status_code}")
+                    logger.warning(f"Google API auth error {resp.status_code} on key {key_attempt + 1}, trying next key")
                     
-                    # Check if we have any available keys left
+                    # Check if we have more keys to try
                     if not self.api_key_rotator.has_available_keys():
-                        logger.error(f"All Google API keys exhausted after auth errors")
+                        logger.error("All Google API keys have auth errors")
                         return None
+                    continue
                     
-                    key_rotation_attempts += 1
-                    if key_rotation_attempts >= max_key_rotations:
-                        logger.error(f"Exhausted all Google API keys after {key_rotation_attempts} rotations")
-                        return None
-                    
-                    logger.warning(f"Google API auth error {resp.status_code}. Rotating key (rotation {key_rotation_attempts})")
-                    
-                    # Get new key for next attempt
-                    api_key = self.api_key_rotator.get_current_key()
-                    if api_key:
-                        params['key'] = api_key
-                    await asyncio.sleep(2 ** attempt + random.random())
                 else:
                     logger.warning(f"Google API returned status {resp.status_code}: {resp.text[:200]}")
-                    await asyncio.sleep(2 ** attempt + random.random())
+                    return None
                     
+            except asyncio.TimeoutError:
+                logger.error("Timeout in Google API search - trying next key")
+                self.api_key_rotator.mark_key_failed(api_key, "Timeout error")
+                if not self.api_key_rotator.has_available_keys():
+                    return None
+                continue
             except (httpx.ConnectError, httpx.ReadTimeout) as e:
-                logger.warning(f"Google API request error: {e}")
-                await asyncio.sleep(2 ** attempt + random.uniform(0, 1))
-                
+                logger.warning(f"Google API request error: {e} - trying next key")
+                self.api_key_rotator.mark_key_failed(api_key, f"Connection error: {e}")
+                if not self.api_key_rotator.has_available_keys():
+                    return None
+                continue
+            except Exception as e:
+                logger.error(f"Unexpected Google API error: {e}")
+                return None
+        
+        logger.error(f"All {max_key_attempts} Google API keys exhausted")
         return None
 
     async def search(self, query: str, max_results: int = 10) -> List[SearchResult]:
@@ -152,7 +155,7 @@ class GoogleSearchEngine(BaseSearchEngine):
                 
                 data = await self._google_api_search(client, query, num_to_fetch, start)
                 if not data:
-                    logger.warning(f"No data returned from Google API for start={start}")
+                    logger.warning(f"No data returned from Google API for start={start} - API keys may be exhausted")
                     break
                     
                 items = data.get('items', []) or []
@@ -189,5 +192,8 @@ class GoogleSearchEngine(BaseSearchEngine):
                     logger.info(f"Reached Google API start limit ({max_start}), stopping pagination")
                     break
                 
-        logger.info(f"Found {len(results)} results from Google (Custom Search API) for: {query}")
+        if results:
+            logger.info(f"Found {len(results)} results from Google (Custom Search API) for: {query}")
+        else:
+            logger.warning(f"Google search returned no results for: {query} - API keys may be exhausted")
         return results

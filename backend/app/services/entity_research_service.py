@@ -97,6 +97,7 @@ class EntityResearchService:
                     "status_code": page.status_code,
                     "success": page.status_code == 200 and not page.error
                 })
+                print(f"Crawled page {pages_crawled} of {total_urls} | {page.title}")
                 
                 if page.status_code == 200 and not page.error and page.content:
                     try:
@@ -110,7 +111,7 @@ class EntityResearchService:
                                 entity_type=entity_type,
                                 keywords=keywords
                             ),
-                            timeout=20
+                            timeout=100
                         )
                         self.logger.info(
                             f"LLM extract done | url={page.url} | keys={list((llm_result or {}).keys())}"
@@ -493,8 +494,11 @@ class EntityResearchService:
         try:
             self.logger.debug(f"Starting search on {engine_name} with query: {query}")
             
-            # Execute the search
-            results = await engine.search(query, max_results=self.max_search_results)
+            # Execute the search with timeout
+            results = await asyncio.wait_for(
+                engine.search(query, max_results=self.max_search_results),
+                timeout=15.0  # 15 second timeout per search engine
+            )
             
             # Filter out non-crawlable URLs
             filtered_results = []
@@ -533,11 +537,18 @@ class EntityResearchService:
         except Exception as e:
             # Log detailed error information
             duration = asyncio.get_event_loop().time() - start_time
+            
+            # Get more detailed error information
+            error_type = type(e).__name__
+            error_str = str(e) if str(e) else "No error message"
+            error_repr = repr(e)
+            
             error_msg = (
                 f"Error searching {engine_name} after {duration:.2f}s. "
-                f"Query: '{query}'. Error: {str(e)[:200]}"
+                f"Query: '{query}'. Error Type: {error_type}. "
+                f"Error: {error_str}. Full Error: {error_repr[:300]}"
             )
-            self.logger.error(error_msg, exc_info=not isinstance(e, (aiohttp.ClientError, asyncio.TimeoutError)))
+            self.logger.error(error_msg, exc_info=True)  # Always include stack trace for debugging
             return []
     
     async def _crawl_search_results(self, search_results: List[Dict]) -> List[CrawledPage]:

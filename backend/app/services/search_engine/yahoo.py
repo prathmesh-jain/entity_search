@@ -46,7 +46,7 @@ class YahooSearchEngine(BaseSearchEngine):
         search_url = f"https://search.yahoo.com/search?p={query}&b={start}"
         
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            browser = await p.chromium.launch(headless=False)
             context = await browser.new_context(
                 user_agent=(
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -109,9 +109,10 @@ class YahooSearchEngine(BaseSearchEngine):
         
         try:
             page = 1
-            results_per_page = 10
+            results_per_page = 7
+            max_page = max_results//results_per_page
             
-            while len(results) < max_results:
+            while len(results) < max_results and page<=max_page:
                 remaining = max_results - len(results)
                 current_page_limit = min(results_per_page, remaining)
                 
@@ -133,21 +134,21 @@ class YahooSearchEngine(BaseSearchEngine):
                         if link not in seen:
                             seen.add(link)
                             results.append(SearchResult(url=link, source='yahoo'))
-                            
+                            # print(len(results),"  --  ",max_results,page)
                             if len(results) >= max_results:
                                 break
                 
                 logger.debug(f"Found {len(page_results)} results on page {page}")
                 
                 # If we got fewer results than expected, we've reached the end
-                if len(page_results) < results_per_page:
-                    logger.info(f"Received fewer results ({len(page_results)}) than expected, stopping pagination")
-                    break
+                # if len(page_results) < results_per_page:
+                #     logger.info(f"Received fewer results ({len(page_results)}) than expected, stopping pagination")
+                #     break
                 
                 page += 1
                 
         except Exception as e:
-            logger.error(f"Error during Yahoo search: {e}")
+            logger.error(f"Error in Yahoo Playwright search: {type(e).__name__}: {str(e)}", exc_info=True)
             
         logger.info(f"Found {len(results)} results from Yahoo (Playwright) for: {query}")
         return results

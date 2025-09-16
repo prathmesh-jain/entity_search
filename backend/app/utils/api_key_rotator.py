@@ -129,8 +129,9 @@ class APIKeyRotator:
             # Move to next available key
             if len(self.keys) > 1:
                 self.current_index = (self.current_index + 1) % len(self.keys)
-                next_key = self.get_current_key()
-                if next_key:
+                # Check if next key is available without calling get_current_key (avoid deadlock)
+                next_key = self.keys[self.current_index]
+                if next_key not in self.failed_keys:
                     logger.info(f"Switched to next {self.key_prefix} key")
                 else:
                     logger.error(f"All {self.key_prefix} keys are now failed!")

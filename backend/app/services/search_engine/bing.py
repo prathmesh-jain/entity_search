@@ -160,36 +160,38 @@ class BingSearchEngine(BaseSearchEngine):
         results: List[SearchResult] = []
         seen = set()
         
-        headers = {
-            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "accept-encoding": "gzip, deflate, br, zstd",
-            "accept-language": "en-US,en;q=0.9",
-            "cache-control": "max-age=0",
-            "sec-ch-ua": '"Google Chrome";v="120", "Chromium";v="120", "Not=A?Brand";v="24"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "sec-fetch-dest": "document",
-            "sec-fetch-mode": "navigate",
-            "sec-fetch-site": "none",
-            "sec-fetch-user": "?1",
-            "upgrade-insecure-requests": "1"
-        }
-        
-        page = 1
-        results_per_page = 10
-        
-        while len(results) < max_results:
-            # Create fresh browser instance for each page to avoid detection
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--no-sandbox',
-                        '--disable-blink-features=AutomationControlled',
-                        '--disable-web-security',
-                        '--disable-features=VizDisplayCompositor'
-                    ]
-                )
+        try:
+            headers = {
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "accept-language": "en-US,en;q=0.9",
+                "cache-control": "no-cache",
+                "dnt": "1",
+                "pragma": "no-cache",
+                "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "upgrade-insecure-requests": "1"
+            }
+            
+            page = 1
+            results_per_page = 10
+            
+            while len(results) < max_results:
+                # Create fresh browser instance for each page to avoid detection
+                async with async_playwright() as p:
+                    browser = await p.chromium.launch(
+                        headless=True,
+                        args=[
+                            '--no-sandbox',
+                            '--disable-blink-features=AutomationControlled',
+                            '--disable-web-security',
+                            '--disable-features=VizDisplayCompositor'
+                        ]
+                    )
                 
                 # Create new context with randomized properties
                 context = await browser.new_context(
@@ -279,6 +281,10 @@ class BingSearchEngine(BaseSearchEngine):
                 # Longer delay between pages to avoid detection
                 if len(results) < max_results:
                     await asyncio.sleep(random.uniform(8, 15))
+        
+        except Exception as e:
+            logger.error(f"Error in Bing Playwright search: {type(e).__name__}: {str(e)}", exc_info=True)
+            return []
         
         logger.info(f"Found {len(results)} results from Bing (Playwright) for: {query}")
         return results

@@ -94,66 +94,181 @@ class BaseCrawler:
             # Add random delay to avoid being blocked
             await asyncio.sleep(random.uniform(0.1, self.request_delay))
             
+            # First try with normal Chromium (HTTP/2 enabled)
             try:
-                async with async_playwright() as p:
-                    browser = await p.chromium.launch(headless=False)
-                    context = await browser.new_context(
-                        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                        viewport={'width': 1920, 'height': 1080},
-                        ignore_https_errors=True,
-                        extra_http_headers=headers
-                    )
-                    page = await context.new_page()
-                    
-                    try:
-                        # Set a timeout for the page load
-                        response = await page.goto(url,wait_until='domcontentloaded')
-                        
-                        # Wait for the page to be fully loaded
-                        await page.wait_for_selector('body', timeout=30000)
-                        
-                        # Get page title and HTML content
-                        title = await page.title()
-
-                        content=await page.content()
-                        soup = BeautifulSoup(content, "html.parser")
-
-                        # Remove unwanted tags
-                        for tag in soup(["script", "style", "noscript", "img", "svg"]):tag.decompose()
-
-                        content = soup.get_text(separator="\n", strip=True)
-                        return CrawledPage(
-                            url=url,
-                            title=title,
-                            content=content.strip() if content else '',
-                            status_code=response.status if response else 200,
-                            metadata={
-                                'final_url': page.url,
-                                'content_type': response.headers.get('content-type') if response else 'text/html',
-                                'content_extracted': bool(content)
-                            }
-                        )
-                        
-                    except Exception as e:
-                        print(repr(e))
-                        return CrawledPage(
-                            url=url,
-                            title='Error',
-                            content='',
-                            status_code=0,
-                            error=str(e),
-                            metadata={'error_type': type(e).__name__}
-                        )
-                    
-                    finally:
-                        await browser.close()
-                        
+                return await self._crawl_with_browser(url, disable_http2=False)
             except Exception as e:
+                # If we get HTTP/2 protocol error or empty response, retry with more aggressive settings
+                if any(error in str(e) for error in ["ERR_HTTP2_PROTOCOL_ERROR", "ERR_EMPTY_RESPONSE", "net::ERR_"]):
+                    print(f"Network error for {url}, retrying with fallback settings: {str(e)[:100]}")
+                    try:
+                        return await self._crawl_with_browser(url, disable_http2=True)
+                    except Exception as fallback_error:
+                        # Final fallback with even more aggressive settings
+                        print(f"Fallback also failed for {url}, trying with aggressive settings: {str(fallback_error)[:100]}")
+                        try:
+                            return await self._crawl_with_aggressive_settings(url)
+                        except Exception as final_error:
+                            return CrawledPage(
+                                url=url,
+                                title='Error',
+                                content='',
+                                status_code=0,
+                                error=str(final_error),
+                                metadata={'error_type': type(final_error).__name__, 'all_fallbacks_attempted': True}
+                            )
+                else:
+                    return CrawledPage(
+                        url=url,
+                        title='Error',
+                        content='',
+                        status_code=0,
+                        error=str(e),
+                        metadata={'error_type': type(e).__name__}
+                    )
+    
+    async def _crawl_with_browser(self, url: str, disable_http2: bool = False) -> CrawledPage:
+        """
+        Crawl a single URL with a specific browser configuration.
+        
+        Args:
+            url: URL to crawl
+            disable_http2: Whether to disable HTTP/2 protocol
+            
+        Returns:
+            CrawledPage object with the page content and metadata
+        """
+        async with async_playwright() as p:
+            # Configure browser launch args - match playwright_test.py
+            launch_args = []
+            if disable_http2:
+                launch_args.append('--disable-http2')
+            
+            browser = await p.chromium.launch(headless=False, args=launch_args)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="America/New_York",
+                ignore_https_errors=True,
+                extra_http_headers=headers
+            )
+            page = await context.new_page()
+            
+            try:
+                # Set a timeout for the page load - match playwright_test.py
+                response = await page.goto(url, wait_until='domcontentloaded')
+                
+                # Wait for the page to be fully loaded
+                await page.wait_for_selector('body', timeout=30000)
+                
+                # Get page title and HTML content
+                title = await page.title()
+
+                content = await page.content()
+                soup = BeautifulSoup(content, "html.parser")
+
+                # Remove unwanted tags
+                for tag in soup(["script", "style", "noscript", "img", "svg"]):
+                    tag.decompose()
+
+                content = soup.get_text(separator="\n", strip=True)
                 return CrawledPage(
                     url=url,
-                    title='Error',
-                    content='',
-                    status_code=0,
-                    error=str(e),
-                    metadata={'error_type': type(e).__name__}
+                    title=title,
+                    content=content.strip() if content else '',
+                    status_code=response.status if response else 200,
+                    metadata={
+                        'final_url': page.url,
+                        'content_type': response.headers.get('content-type') if response else 'text/html',
+                        'content_extracted': bool(content),
+                        'http2_disabled': disable_http2
+                    }
                 )
+                
+            except Exception as e:
+                print(f"Error crawling {url} (HTTP/2 disabled: {disable_http2}): {repr(e)}")
+                raise e
+            
+            finally:
+                await browser.close()
+    
+    async def _crawl_with_aggressive_settings(self, url: str) -> CrawledPage:
+        """
+        Final fallback with aggressive browser settings to handle problematic sites.
+        
+        Args:
+            url: URL to crawl
+            
+        Returns:
+            CrawledPage object with the page content and metadata
+        """
+        async with async_playwright() as p:
+            # Aggressive browser launch args
+            launch_args = [
+                '--disable-http2',
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                '--disable-extensions',
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-background-timer-throttling',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding'
+            ]
+            
+            browser = await p.chromium.launch(headless=False, args=launch_args)
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                viewport={"width": 1920, "height": 1080},
+                locale="en-US",
+                timezone_id="America/New_York",
+                ignore_https_errors=True,
+                extra_http_headers=headers,
+                bypass_csp=True
+            )
+            page = await context.new_page()
+            
+            try:
+                # More aggressive page loading with longer timeout
+                response = await page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                
+                # Wait for the page to be fully loaded with longer timeout
+                try:
+                    await page.wait_for_selector('body', timeout=30000)
+                except:
+                    # If body selector fails, just wait a bit and continue
+                    await asyncio.sleep(2)
+                
+                # Get page title and HTML content
+                title = await page.title()
+
+                content = await page.content()
+                soup = BeautifulSoup(content, "html.parser")
+
+                # Remove unwanted tags
+                for tag in soup(["script", "style", "noscript", "img", "svg"]):
+                    tag.decompose()
+
+                content = soup.get_text(separator="\n", strip=True)
+                return CrawledPage(
+                    url=url,
+                    title=title,
+                    content=content.strip() if content else '',
+                    status_code=response.status if response else 200,
+                    metadata={
+                        'final_url': page.url,
+                        'content_type': response.headers.get('content-type') if response else 'text/html',
+                        'content_extracted': bool(content),
+                        'aggressive_mode': True
+                    }
+                )
+                
+            except Exception as e:
+                print(f"Aggressive crawling failed for {url}: {repr(e)}")
+                raise e
+            
+            finally:
+                await browser.close()

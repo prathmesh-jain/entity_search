@@ -68,7 +68,7 @@ def yahoo_search_playwright(query: str, page_num: int = 1, results_per_page: int
         return results
 
 if __name__ == "__main__":
-    q = "openai"
+    q = "Ashley Smith Daughter of Mark Smith(Commisioner of County Commision of Sarasota, Florida)"
     for page_n in [1, 2]:
         res = yahoo_search_playwright(q, page_num=page_n, results_per_page=10)
         print(f"Page {page_n}:")
