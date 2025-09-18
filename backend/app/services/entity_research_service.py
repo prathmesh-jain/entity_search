@@ -72,95 +72,102 @@ class EntityResearchService:
                 self.logger.warning("No search results found for the given queries")
                 return self._create_empty_result(entity_name, "No search results found")
             
-            # Step 2: Crawl the search results (stream) and process with LLM incrementally
-            self.logger.info("Crawling search results (streaming) and processing with LLM...")
+            # Step 2: Crawl and analyze in parallel - start LLM analysis immediately after each page is crawled
+            self.logger.info("Starting parallel crawling and LLM analysis...")
             urls = [r["url"] for r in search_results]
             total_urls = len(urls)
-            pages_crawled = 0
+            
+            # Shared data structures for collecting results
             profiles: List[Dict[str, Any]] = []
             clusters: Dict[str, List[Dict[str, Any]]] = {"query_name": [], "uncertain": []}
             per_field_sources: Dict[str, set] = {}
             sources_meta: List[Dict[str, Any]] = []
-            source_url_to_id: Dict[str, int] = {}  # Map URLs to source IDs
+            source_url_to_id: Dict[str, int] = {}
             
-            async for page in self.crawler.crawl_stream(urls):
-                pages_crawled += 1
-                # Assign source ID based on order
-                source_id = len(sources_meta) + 1
-                source_url_to_id[page.url] = source_id
-                
-                # Record source meta with ID
-                sources_meta.append({
-                    "source_id": source_id,
-                    "url": page.url,
-                    "title": page.title,
-                    "status_code": page.status_code,
-                    "success": page.status_code == 200 and not page.error
-                })
-                print(f"Crawled page {pages_crawled} of {total_urls} | {page.title}")
-                
-                if page.status_code == 200 and not page.error and page.content:
-                    try:
-                        # Timeout per page LLM extraction to avoid hanging
-                        content_len = len(page.content or "")
-                        self.logger.info(f"LLM extract start | url={page.url} | content_len={content_len}")
-                        llm_result = await asyncio.wait_for(
-                            self.llm_client.extract_entity_info(
-                                content=page.content,
-                                entity_name=entity_name,
-                                entity_type=entity_type,
-                                keywords=keywords
-                            ),
-                            timeout=100
-                        )
-                        self.logger.info(
-                            f"LLM extract done | url={page.url} | keys={list((llm_result or {}).keys())}"
-                        )
-                        profile = {
-                            **llm_result,
-                            "source_url": page.url,
-                            "source_title": page.title,
-                            "status_code": page.status_code
-                        }
-                        profiles.append(profile)
-                        # Bucketize
-                        detected = (llm_result.get("detected_entity_name") or "").strip()
-                        same_as = bool(llm_result.get("same_as_input"))
-                        if same_as:
-                            clusters.setdefault("query_name", []).append(profile)
-                        elif detected:
-                            clusters.setdefault(detected, []).append(profile)
-                        else:
-                            clusters.setdefault("uncertain", []).append(profile)
-                        # Per-field sources attribution with source IDs
-                        for field, value in (llm_result.get("extracted_info") or {}).items():
-                            if value is not None and value != "":
-                                per_field_sources.setdefault(field, set()).add(source_id)
-                        
-                        if progress_callback:
-                            progress_callback(phase="analyzing", payload={
-                                "message": "Analyzed a page",
-                                "pages_crawled": pages_crawled,
-                                "pages_total": total_urls,
-                                "profiles_count": len(profiles),
-                                "clusters_summary": {k: len(v) for k, v in clusters.items()}
-                            })
-                    except asyncio.TimeoutError:
-                        self.logger.warning(f"LLM extraction timed out for {page.url}")
-                    except Exception as e:
-                        self.logger.warning(f"LLM processing failed for {page.url}: {str(e)}")
-                else:
-                    self.logger.info(
-                        f"Skipping page for LLM | url={page.url} | status={page.status_code} | error={page.error} | has_content={(page.content is not None and len(page.content)>0)}"
-                    )
-                    if progress_callback:
-                        progress_callback(phase="crawling", payload={
-                            "message": "Crawled a page",
-                            "pages_crawled": pages_crawled,
-                            "pages_total": total_urls
-                        })
+            # Create tasks for parallel crawling and LLM processing
+            async def process_single_url(url: str, url_index: int) -> None:
+                """Crawl a single URL and immediately process with LLM."""
+                try:
+                    # Crawl the page
+                    page = await self.crawler._crawl_single(url)
+                    
+                    # Assign source ID based on URL index for consistent ordering
+                    source_id = url_index + 1
+                    source_url_to_id[page.url] = source_id
+                    
+                    # Record source meta with ID
+                    source_meta = {
+                        "source_id": source_id,
+                        "url": page.url,
+                        "title": page.title,
+                        "status_code": page.status_code,
+                        "success": page.status_code == 200 and not page.error
+                    }
+                    sources_meta.append(source_meta)
+                    
+                    print(f"Crawled and analyzing: {page.title}")
+                    
+                    if page.status_code == 200 and not page.error and page.content:
+                        try:
+                            # Process with LLM immediately after crawling
+                            content_len = len(page.content or "")
+                            self.logger.info(f"LLM extract start | url={page.url} | content_len={content_len}")
+                            
+                            llm_result = await asyncio.wait_for(
+                                self.llm_client.extract_entity_info(
+                                    content=page.content,
+                                    entity_name=entity_name,
+                                    entity_type=entity_type,
+                                    keywords=keywords
+                                ),
+                                timeout=100
+                            )
+                            
+                            self.logger.info(
+                                f"LLM extract done | url={page.url} | keys={list((llm_result or {}).keys())}"
+                            )
+                            
+                            profile = {
+                                **llm_result,
+                                "source_url": page.url,
+                                "source_title": page.title,
+                                "status_code": page.status_code
+                            }
+                            profiles.append(profile)
+                            
+                            # Bucketize
+                            detected = (llm_result.get("detected_entity_name") or "").strip()
+                            same_as = bool(llm_result.get("same_as_input"))
+                            if same_as:
+                                clusters.setdefault("query_name", []).append(profile)
+                            elif detected:
+                                clusters.setdefault(detected, []).append(profile)
+                            else:
+                                clusters.setdefault("uncertain", []).append(profile)
+                                
+                            # Per-field sources attribution with source IDs
+                            for field, value in (llm_result.get("extracted_info") or {}).items():
+                                if value is not None and value != "":
+                                    per_field_sources.setdefault(field, set()).add(source_id)
+                                    
+                        except asyncio.TimeoutError:
+                            self.logger.warning(f"LLM extraction timed out for {page.url}")
+                        except Exception as e:
+                            self.logger.error(f"Error in LLM processing for {page.url}: {str(e)}", exc_info=True)
+                    
+                except Exception as e:
+                    self.logger.error(f"Error processing URL {url}: {str(e)}", exc_info=True)
             
-            self.logger.info(f"Streaming crawl completed. Processed {pages_crawled} pages")
+            # Create all tasks and run them in parallel
+            tasks = [
+                asyncio.create_task(process_single_url(url, i)) 
+                for i, url in enumerate(urls)
+            ]
+            
+            # Wait for all crawling and LLM processing to complete
+            await asyncio.gather(*tasks, return_exceptions=True)
+            
+            self.logger.info(f"Parallel processing completed. Processed {len(urls)} URLs with {len(profiles)} successful extractions")
             if not profiles:
                 return self._create_empty_result(entity_name, "No valid pages processed by LLM")
 
@@ -497,7 +504,7 @@ class EntityResearchService:
             # Execute the search with timeout
             results = await asyncio.wait_for(
                 engine.search(query, max_results=self.max_search_results),
-                timeout=15.0  # 15 second timeout per search engine
+                timeout=45.0  # 45 second timeout per search engine
             )
             
             # Filter out non-crawlable URLs
