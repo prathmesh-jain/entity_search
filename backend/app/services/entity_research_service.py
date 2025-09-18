@@ -84,6 +84,10 @@ class EntityResearchService:
             sources_meta: List[Dict[str, Any]] = []
             source_url_to_id: Dict[str, int] = {}
             
+            # Progress tracking for parallel processing
+            completed_count = 0
+            completed_lock = asyncio.Lock()
+            
             # Create tasks for parallel crawling and LLM processing
             async def process_single_url(url: str, url_index: int) -> None:
                 """Crawl a single URL and immediately process with LLM."""
@@ -105,7 +109,19 @@ class EntityResearchService:
                     }
                     sources_meta.append(source_meta)
                     
-                    print(f"Crawled and analyzing: {page.title}")
+                    # Update progress counter and notify frontend
+                    async with completed_lock:
+                        nonlocal completed_count
+                        completed_count += 1
+                        print(f"Crawled and analyzing ({completed_count}/{total_urls}): {page.title}")
+                        
+                        if progress_callback:
+                            progress_callback(phase="crawling", payload={
+                                "message": f"Processing page {completed_count} of {total_urls}",
+                                "pages_crawled": completed_count,
+                                "pages_total": total_urls,
+                                "current_page": page.title
+                            })
                     
                     if page.status_code == 200 and not page.error and page.content:
                         try:
@@ -134,6 +150,15 @@ class EntityResearchService:
                                 "status_code": page.status_code
                             }
                             profiles.append(profile)
+                            
+                            # Update progress with LLM completion
+                            if progress_callback:
+                                progress_callback(phase="analyzing", payload={
+                                    "message": f"Analyzed page {completed_count} of {total_urls}",
+                                    "pages_analyzed": len(profiles),
+                                    "pages_total": total_urls,
+                                    "current_page": page.title
+                                })
                             
                             # Bucketize
                             detected = (llm_result.get("detected_entity_name") or "").strip()
