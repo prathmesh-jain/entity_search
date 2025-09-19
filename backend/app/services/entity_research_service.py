@@ -88,6 +88,12 @@ class EntityResearchService:
             completed_count = 0
             completed_lock = asyncio.Lock()
             
+            # Streaming consolidation setup
+            consolidation_chunk_size = 10
+            consolidated_entities = []
+            consolidation_tasks = []
+            consolidation_lock = asyncio.Lock()
+            
             # Create tasks for parallel crawling and LLM processing
             async def process_single_url(url: str, url_index: int) -> None:
                 """Crawl a single URL and immediately process with LLM."""
@@ -174,6 +180,17 @@ class EntityResearchService:
                             for field, value in (llm_result.get("extracted_info") or {}).items():
                                 if value is not None and value != "":
                                     per_field_sources.setdefault(field, set()).add(source_id)
+                            
+                            # Check if we have enough profiles for streaming consolidation
+                            async with consolidation_lock:
+                                if len(profiles) >= consolidation_chunk_size and len(profiles) % consolidation_chunk_size == 0:
+                                    # Start consolidation for this chunk
+                                    chunk_profiles = profiles[-consolidation_chunk_size:].copy()
+                                    consolidation_task = asyncio.create_task(
+                                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
+                                    )
+                                    consolidation_tasks.append(consolidation_task)
+                                    self.logger.info(f"Started consolidation task {len(consolidation_tasks)} for profiles {len(profiles)-consolidation_chunk_size+1}-{len(profiles)}")
                                     
                         except asyncio.TimeoutError:
                             self.logger.warning(f"LLM extraction timed out for {page.url}")
@@ -192,6 +209,30 @@ class EntityResearchService:
             # Wait for all crawling and LLM processing to complete
             await asyncio.gather(*tasks, return_exceptions=True)
             
+            # Handle remaining profiles that didn't reach chunk size
+            async with consolidation_lock:
+                remaining_profiles = len(profiles) % consolidation_chunk_size
+                if remaining_profiles > 0:
+                    chunk_profiles = profiles[-remaining_profiles:].copy()
+                    consolidation_task = asyncio.create_task(
+                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
+                    )
+                    consolidation_tasks.append(consolidation_task)
+                    self.logger.info(f"Started final consolidation task for remaining {remaining_profiles} profiles")
+            
+            # Wait for all consolidation tasks to complete
+            if consolidation_tasks:
+                self.logger.info(f"Waiting for {len(consolidation_tasks)} consolidation tasks to complete...")
+                consolidation_results = await asyncio.gather(*consolidation_tasks, return_exceptions=True)
+                
+                # Collect all consolidated entities
+                for i, result in enumerate(consolidation_results):
+                    if isinstance(result, dict) and result.get("entities"):
+                        consolidated_entities.extend(result["entities"])
+                        self.logger.info(f"Consolidation task {i+1} completed with {len(result['entities'])} entities")
+                    elif isinstance(result, Exception):
+                        self.logger.error(f"Consolidation task {i+1} failed: {result}")
+            
             self.logger.info(f"Parallel processing completed. Processed {len(urls)} URLs with {len(profiles)} successful extractions")
             if not profiles:
                 return self._create_empty_result(entity_name, "No valid pages processed by LLM")
@@ -203,34 +244,57 @@ class EntityResearchService:
                     "profiles_count": len(profiles)
                 })
 
-            use_llm_combine = os.getenv("USE_LLM_CONSOLIDATE", "0") in ("1", "true", "True")
-            self.logger.info(f"Starting final consolidation | mode={'LLM' if use_llm_combine else 'LOCAL'} | profiles={len(profiles)}")
-
-            if not use_llm_combine:
-                final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
-                self.logger.info("Local consolidation completed")
-                if progress_callback:
-                    progress_callback(phase="combining", payload={
-                        "message": "Consolidation completed (local)",
-                        "profiles_count": len(profiles)
-                    })
-            else:
-                try:
-                    if len(profiles) > 20:
-                        # Use chunking strategy for large profile sets
-                        final_entities = await self._chunked_consolidation(entity_name, entity_type, profiles, source_url_to_id)
-                    else:
-                        # Direct consolidation for smaller sets
-                        final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
+            # If we have streaming consolidated entities, do final consolidation on them
+            if consolidated_entities:
+                self.logger.info(f"Starting final consolidation of {len(consolidated_entities)} streaming results")
                 
-                    self.logger.info("Final consolidation completed (LLM)")
-                    if not final_entities or not final_entities.get("entities"):
-                        self.logger.info("LLM consolidation returned empty; using local consolidation fallback")
-                        final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
+                # Convert consolidated entities back to profile format for final pass
+                final_profiles = []
+                for idx, entity in enumerate(consolidated_entities):
+                    final_profiles.append({
+                        "detected_entity_name": entity.get("canonical_name"),
+                        "same_as_input": entity.get("same_as_query", False),
+                        "confidence": 0.8,  # High confidence for already consolidated entities
+                        "extracted_info": entity.get("combined_fields", {}),
+                        "source_url": f"consolidated_chunk_{idx}"
+                    })
+                
+                try:
+                    final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
+                    self.logger.info("Streaming consolidation with final pass completed")
                 except Exception as e:
-                    self.logger.error(f"LLM consolidation failed: {e}")
-                    self.logger.info("Using local consolidation fallback due to LLM error")
+                    self.logger.warning(f"Final consolidation failed: {e}, using streaming results as-is")
+                    final_entities = {"entities": consolidated_entities}
+            else:
+                # Fallback to traditional consolidation
+                use_llm_combine = os.getenv("USE_LLM_CONSOLIDATE", "0") in ("1", "true", "True")
+                self.logger.info(f"Starting traditional consolidation | mode={'LLM' if use_llm_combine else 'LOCAL'} | profiles={len(profiles)}")
+
+                if not use_llm_combine:
                     final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
+                    self.logger.info("Local consolidation completed")
+                    if progress_callback:
+                        progress_callback(phase="combining", payload={
+                            "message": "Consolidation completed (local)",
+                            "profiles_count": len(profiles)
+                        })
+                else:
+                    try:
+                        if len(profiles) > 20:
+                            # Use chunking strategy for large profile sets
+                            final_entities = await self._chunked_consolidation(entity_name, entity_type, profiles, source_url_to_id)
+                        else:
+                            # Direct consolidation for smaller sets
+                            final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
+                        
+                        self.logger.info("Final consolidation completed (LLM)")
+                        if not final_entities or not final_entities.get("entities"):
+                            self.logger.info("LLM consolidation returned empty; using local consolidation fallback")
+                            final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
+                    except Exception as e:
+                        self.logger.error(f"LLM consolidation failed: {e}")
+                        self.logger.info("Using local consolidation fallback due to LLM error")
+                        final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
             
             # Prepare the final result
             # Include final entities produced by combine pass
@@ -722,6 +786,19 @@ class EntityResearchService:
             return SequenceMatcher(None, query_name.lower(), name.lower()).ratio()
         
         return sorted(entities, key=similarity_score, reverse=True)
+
+    async def _consolidate_chunk_async(self, entity_name: str, entity_type: str, chunk_profiles: List[Dict[str, Any]], chunk_id: int) -> Dict[str, Any]:
+        """Consolidate a single chunk of profiles asynchronously."""
+        try:
+            self.logger.info(f"Starting consolidation for chunk {chunk_id} with {len(chunk_profiles)} profiles")
+            result = await self.llm_client.consolidate_clusters(entity_name, entity_type, chunk_profiles)
+            self.logger.info(f"Chunk {chunk_id} consolidation completed")
+            return result
+        except Exception as e:
+            self.logger.warning(f"Chunk {chunk_id} consolidation failed: {e}, using local fallback")
+            # Fallback to local consolidation for this chunk
+            local_entities = self._local_consolidate(entity_name, chunk_profiles, {})
+            return {"entities": local_entities}
 
     async def _chunked_consolidation(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> Dict[str, Any]:
         """Consolidate large profile sets using chunking strategy."""
