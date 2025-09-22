@@ -13,36 +13,36 @@ import {
 
 const features = [
   {
-    name: 'Comprehensive Search',
-    description: 'Search across multiple search engines to gather comprehensive information about any entity.',
+    name: 'Multi-Engine Search',
+    description: 'Simultaneously search Google, Bing, and Yahoo to ensure no relevant information is missed.',
     icon: MagnifyingGlassIcon,
     color: 'bg-blue-100 text-blue-600'
   },
   {
-    name: 'Structured Data Extraction',
-    description: 'Automatically extract structured information like DOB, Age, Line of Business, and more.',
+    name: 'AI Data Extraction',
+    description: 'Advanced AI extracts 25+ structured data points including personal details, business info, and more.',
     icon: ChartBarIcon,
     color: 'bg-purple-100 text-purple-600'
   },
   {
-    name: 'Adverse Entity Verification',
-    description: 'Identify and verify entities that may be flagged as suspicious in public records.',
+    name: 'Smart Entity Matching',
+    description: 'Intelligent algorithms ensure accurate entity identification and consolidation across sources.',
     icon: ShieldCheckIcon,
     color: 'bg-green-100 text-green-600'
   },
   {
-    name: 'Public Domain Checks',
-    description: 'Perform thorough background checks on clients flagged in internal systems.',
+    name: 'Comprehensive Analysis',
+    description: 'Get detailed profiles with source attribution and confidence scoring for reliable insights.',
     icon: DocumentMagnifyingGlassIcon,
     color: 'bg-amber-100 text-amber-600'
   },
 ];
 
 const stats = [
-  { id: 1, name: 'Search Engines Integrated', value: '10+', icon: GlobeAltIcon },
-  { id: 2, name: 'Data Points Extracted', value: '50+', icon: ChartBarIcon },
-  { id: 3, name: 'Verification Accuracy', value: '99.9%', icon: ScaleIcon },
-  { id: 4, name: 'Processing Speed', value: 'Instant', icon: BoltIcon },
+  { id: 1, name: 'Major Search Engines', value: 'All 3', icon: GlobeAltIcon },
+  { id: 2, name: 'Data Points Extracted', value: '25+', icon: ChartBarIcon },
+  { id: 3, name: 'AI-Powered Analysis', value: 'Advanced', icon: ScaleIcon },
+  { id: 4, name: 'Processing Time', value: '~2 min', icon: BoltIcon },
 ];
 
 const Home = () => {
@@ -70,7 +70,7 @@ const Home = () => {
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ duration: 0.5, delay: 0.1 }}
               >
-                Unlock comprehensive insights about any entity with our powerful search and analysis platform.
+Comprehensive entity research using multiple search engines with AI-powered data extraction and analysis.
               </motion.p>
               <motion.div 
                 className="mt-10 flex items-center justify-center gap-x-6"
@@ -119,10 +119,10 @@ const Home = () => {
           <div className="lg:text-center">
             <h2 className="text-base font-semibold text-blue-600 tracking-wide uppercase">Features</h2>
             <p className="mt-2 text-3xl font-bold tracking-tight text-gray-900 sm:text-4xl">
-              Everything you need for entity verification
+Powerful tools for comprehensive entity research
             </p>
             <p className="mt-4 max-w-2xl text-xl text-gray-500 lg:mx-auto">
-              Our platform combines powerful search capabilities with advanced data extraction and analysis.
+Our advanced platform searches major search engines and uses cutting-edge AI to extract and analyze over 25 structured data points with remarkable precision.
             </p>
           </div>
 

@@ -30,7 +30,7 @@ class EntityResearchService:
             max_retries=2,
             request_delay=0.5
         )
-        self.crawler = BaseCrawler(max_concurrent=max_concurrent_requests, request_delay=0.3)
+        self.crawler = BaseCrawler(max_concurrent=max_concurrent_requests, request_delay=0.1)
         self.llm_client = GeminiClient()
         self.logger = logging.getLogger(__name__)
     
@@ -142,7 +142,7 @@ class EntityResearchService:
                                     entity_type=entity_type,
                                     keywords=keywords
                                 ),
-                                timeout=100
+                                timeout=60  # Reduced from 100s to 30s
                             )
                             
                             self.logger.info(
@@ -593,7 +593,7 @@ class EntityResearchService:
             # Execute the search with timeout
             results = await asyncio.wait_for(
                 engine.search(query, max_results=self.max_search_results),
-                timeout=45.0  # 45 second timeout per search engine
+                timeout=60.0  # 60 second timeout per search engine
             )
             
             # Filter out non-crawlable URLs

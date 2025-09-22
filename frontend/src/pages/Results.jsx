@@ -205,7 +205,7 @@ const Results = () => {
   const getSourceUrl = (sourceId) => {
     return sourceIdToDetails[sourceId]?.url || '#';
   };
-  const search_keywords = finalResults?.search_keywords || searchResults?.keywords || [];
+  const search_keywords = finalResults?.search_queries || searchResults?.keywords || [];
 
   const adverse_mentions = [];
   const search_id = headerMeta.search_id;
@@ -563,7 +563,7 @@ const Results = () => {
               <div className="space-y-8">
                 {/* Entity Summary Card */}
                 <div className="bg-gradient-to-r from-blue-50 to-indigo-50 overflow-hidden shadow-lg rounded-xl border border-blue-100">
-                  <div className="px-6 py-6 sm:p-8">
+                  <div className="px-5 py-5">
                     <div className="flex items-center justify-between mb-6">
                       <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
                         <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
@@ -576,12 +576,12 @@ const Results = () => {
 
                     {/* Search Keywords Display */}
                     {search_keywords && search_keywords.length > 0 && (
-                      <div className="mb-6 p-4 bg-white rounded-lg border border-blue-200">
+                      <div className="mb-6 p-3 bg-white rounded-lg border border-blue-200">
                         <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center">
                           <svg className="w-4 h-4 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a2 2 0 01-2.828 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z" />
                           </svg>
-                          Search Keywords Used
+                          Search Query Used
                         </h4>
                         <div className="flex flex-wrap gap-2">
                           {search_keywords.map((keyword, idx) => (
@@ -594,7 +594,7 @@ const Results = () => {
                     )}
 
                     <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
-                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
                         <div className="flex items-center">
                           <div className="flex-shrink-0">
                             <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
@@ -609,7 +609,7 @@ const Results = () => {
                           </div>
                         </div>
                       </div>
-                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
                         <div className="flex items-center">
                           <div className="flex-shrink-0">
                             <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
@@ -624,7 +624,7 @@ const Results = () => {
                           </div>
                         </div>
                       </div>
-                      <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
                         <div className="flex items-center">
                           <div className="flex-shrink-0">
                             <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
@@ -645,7 +645,7 @@ const Results = () => {
 
                 {/* Entity Information */}
                 <div className="bg-white shadow-lg overflow-hidden rounded-xl border border-gray-100">
-                  <div className="px-6 py-6 sm:px-8 bg-gradient-to-r from-blue-50 to-indigo-50">
+                  <div className="px-6 py-5 bg-gradient-to-r from-blue-50 to-indigo-50">
                     <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
                       <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
                       Detailed Information
@@ -654,7 +654,7 @@ const Results = () => {
                       Comprehensive details extracted from various sources with source attribution.
                     </p>
                   </div>
-                  <div className="px-6 py-6 sm:px-8">
+                  <div className="px-5 py-5">
                     {(!basic_info || Object.keys(basic_info).length === 0) ? (
                       <div className="text-center py-12">
                         <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -666,13 +666,13 @@ const Results = () => {
                         <p className="text-gray-500">No comprehensive details available from sources.</p>
                       </div>
                     ) : (
-                      <div className="space-y-4">
+                      <div className="space-y-3">
                         {Object.entries(basic_info).map(([key, value]) => (
                           value &&
-                          <div key={key} className="bg-gradient-to-r from-white to-gray-50 border border-gray-200 rounded-lg p-5 hover:shadow-md transition-all duration-200">
+                          <div key={key} className="bg-gradient-to-r from-white to-gray-50 border border-gray-200 rounded-lg p-3 hover:shadow-md transition-all duration-200">
                             <div className="flex items-start justify-between">
                               <div className="flex-1">
-                                <dt className="text-sm font-bold text-gray-700 capitalize mb-3 flex items-center">
+                                <dt className="text-sm font-bold text-gray-700 capitalize mb-2 flex items-center">
                                   <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center mr-3">
                                     <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -681,7 +681,7 @@ const Results = () => {
                                   {key.replace(/_/g, ' ')}
                                 </dt>
                                 <dd className="text-sm text-gray-900 ml-11">
-                                  <div className="bg-white p-3 rounded border border-gray-100">
+                                  <div className="bg-white p-2 rounded border border-gray-100">
                                     {Array.isArray(value) ? (
                                       <div className="flex flex-wrap gap-2">
                                         {value.map((item, idx) => (
@@ -697,7 +697,7 @@ const Results = () => {
                                     )}
                                   </div>
                                   {per_field_sources && per_field_sources[key] && per_field_sources[key].length > 0 && (
-                                    <div className="mt-3 p-3 bg-gray-50 rounded border border-gray-100">
+                                    <div className="mt-2 p-2 bg-gray-50 rounded border border-gray-100">
                                       <span className="text-xs font-semibold text-gray-600 mb-2 block">Verified Sources:</span>
                                       <div className="flex flex-wrap gap-2">
                                         {per_field_sources[key].map((sourceId, idx) => (

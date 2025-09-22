@@ -147,7 +147,7 @@ const Search = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 px-4 sm:px-6 lg:px-8 pt-20">
+    <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 px-4 sm:px-6 lg:px-8 pt-18">
       <motion.div 
         className="max-w-3xl mx-auto"
         initial="hidden"
@@ -155,26 +155,26 @@ const Search = () => {
         variants={containerVariants}
       >
         <motion.div 
-          className="text-center mb-8"
+          className="text-center mb-5"
           variants={itemVariants}
         >
           <h1 className="text-3xl font-bold text-gray-900">
             Search Entity
           </h1>
-          <p className="mt-3 text-lg text-gray-600">
+          <p className="mt-2 text-base text-gray-600">
             Enter the entity name and related keywords to perform a comprehensive search.
           </p>
         </motion.div>
 
         <motion.div 
-          className={`bg-white p-7 rounded-2xl shadow-xl transition-all duration-300 ${
+          className={`bg-white p-6 rounded-2xl shadow-xl transition-all duration-300 ${
             isFocused ? 'ring-2 ring-blue-500' : 'shadow-sm'
           }`}
           variants={itemVariants}
           onFocus={() => setIsFocused(true)}
           onBlur={() => setIsFocused(false)}
         >
-          <form onSubmit={handleSubmit} className="space-y-8">
+          <form onSubmit={handleSubmit} className="space-y-5">
             {/* Entity Name */}
             <motion.div variants={itemVariants}>
               <label htmlFor="entityName" className="block text-sm font-medium text-gray-700 mb-1">

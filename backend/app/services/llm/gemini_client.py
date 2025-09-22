@@ -760,15 +760,15 @@ class GeminiClient:
                 
                 retry_sec = self._extract_retry_after_seconds(e)
                 if retry_sec is None:
-                    retry_sec = min(30.0, backoff)
-                    backoff = min(60.0, backoff * 2)
+                    retry_sec = min(5.0, backoff)  # Reduced from 30s to 5s
+                    backoff = min(15.0, backoff * 1.5)  # Reduced max backoff from 60s to 15s
                     
                 logger.warning(f"ai.rate_limited retry_in_s={retry_sec:.1f} attempt={attempts} key_rotation={key_rotation_attempts}")
                 await asyncio.wait_for(asyncio.sleep(retry_sec), timeout=min(retry_sec + 5.0, 35.0))
             except (APITimeoutError, APIConnectionError) as e:
                 attempts += 1
-                delay = min(10.0, backoff)
-                backoff = min(60.0, backoff * 2)
+                delay = min(3.0, backoff)  # Reduced from 10s to 3s
+                backoff = min(15.0, backoff * 1.5)  # Reduced max backoff
                 if attempts >= max_attempts:
                     logger.warning(f"ai.retry_exhausted event=transient_error attempts={attempts} last_error={e}")
                     raise
@@ -797,8 +797,8 @@ class GeminiClient:
                     
                     retry_sec = self._extract_retry_after_seconds(e)
                     if retry_sec is None:
-                        retry_sec = min(30.0, backoff)
-                        backoff = min(60.0, backoff * 2)
+                        retry_sec = min(5.0, backoff)  # Reduced from 30s
+                        backoff = min(15.0, backoff * 1.5)  # Reduced max backoff
                     logger.warning(f"ai.rate_limited(APIStatus) retry_in_s={retry_sec:.1f} key_rotation={key_rotation_attempts}")
                     await asyncio.wait_for(asyncio.sleep(retry_sec), timeout=min(retry_sec + 5.0, 35.0))
                 elif status in [401, 403]:
@@ -819,8 +819,8 @@ class GeminiClient:
                         logger.error(f"Exhausted all Gemini API keys after {key_rotation_attempts} rotations")
                         raise
                         
-                    await asyncio.wait_for(asyncio.sleep(backoff), timeout=min(backoff + 5.0, 65.0))
-                    backoff = min(60.0, backoff * 2)
+                    await asyncio.wait_for(asyncio.sleep(min(backoff, 5.0)), timeout=10.0)  # Cap at 5s
+                    backoff = min(15.0, backoff * 1.5)  # Reduced max backoff
                 else:
                     raise
 
