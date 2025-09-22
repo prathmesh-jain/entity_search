@@ -273,9 +273,19 @@ async def perform_research(
                 research_results[research_id]["phase"] = phase
                 # lightweight normalization of known progress fields
                 if phase in ("searching", "crawling", "analyzing", "combining"):
-                    research_results[research_id]["progress"] = {
-                        k: payload.get(k) for k in ["pages_crawled", "pages_total", "profiles_count", "search_results_count"] if k in payload
-                    }
+                    prev_progress = research_results[research_id].get("progress", {}) or {}
+                    merged = dict(prev_progress)
+                    for k in [
+                        "pages_crawled",
+                        "pages_analyzed",
+                        "pages_total",
+                        "profiles_count",
+                        "search_results_count",
+                        "current_page",
+                    ]:
+                        if isinstance(payload, dict) and k in payload:
+                            merged[k] = payload.get(k)
+                    research_results[research_id]["progress"] = merged
                 msg = payload.get("message") if isinstance(payload, dict) else None
                 if msg:
                     events = research_results[research_id].setdefault("events", [])
@@ -378,23 +388,19 @@ async def get_search_history(
     try:
         logger.info(f"Fetching history with limit={limit}, offset={offset}, entity_name={entity_name}")
         
-        history = history_db.get_search_history(
+        result = history_db.get_search_history(
             limit=limit,
             offset=offset,
             entity_name=entity_name
         )
         stats = history_db.get_search_stats()
         
-        logger.info(f"Retrieved {len(history)} history items and stats: {stats}")
+        logger.info(f"Retrieved {len(result['history'])} history items and stats: {stats}")
         
         return {
-            "history": history,
+            "history": result["history"],
             "stats": stats,
-            "pagination": {
-                "limit": limit,
-                "offset": offset,
-                "has_more": len(history) == limit
-            }
+            "pagination": result["pagination"]
         }
     except Exception as e:
         logger.error(f"Error retrieving search history: {e}", exc_info=True)

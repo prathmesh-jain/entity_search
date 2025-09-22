@@ -177,12 +177,24 @@ class HistoryDatabase:
             return False
     
     def get_search_history(self, limit: int = 50, offset: int = 0, 
-                          entity_name: str = None) -> List[Dict[str, Any]]:
-        """Retrieve search history with optional filtering."""
+                          entity_name: str = None) -> Dict[str, Any]:
+        """Retrieve search history with optional filtering and pagination metadata."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.row_factory = sqlite3.Row
                 
+                # First get the total count for pagination
+                count_query = "SELECT COUNT(*) FROM search_history"
+                count_params = []
+                
+                if entity_name:
+                    count_query += " WHERE entity_name LIKE ?"
+                    count_params.append(f"%{entity_name}%")
+                
+                cursor = conn.execute(count_query, count_params)
+                total_count = cursor.fetchone()[0]
+                
+                # Then get the actual data
                 query = """
                     SELECT * FROM search_history
                 """
@@ -200,7 +212,7 @@ class HistoryDatabase:
                 cursor = conn.execute(query, params)
                 rows = cursor.fetchall()
                 
-                logger.debug(f"Found {len(rows)} rows in database")
+                logger.debug(f"Found {len(rows)} rows in database, total: {total_count}")
                 
                 history = []
                 for row in rows:
@@ -234,12 +246,29 @@ class HistoryDatabase:
                     
                     history.append(item)
                 
-                logger.info(f"Successfully processed {len(history)} history items")
-                return history
+                # Calculate pagination metadata
+                total_pages = (total_count + limit - 1) // limit  # Ceiling division
+                current_page = (offset // limit) + 1
+                has_more = offset + limit < total_count
+                
+                pagination = {
+                    "limit": limit,
+                    "offset": offset,
+                    "total": total_count,
+                    "current_page": current_page,
+                    "total_pages": total_pages,
+                    "has_more": has_more
+                }
+                
+                logger.info(f"Successfully processed {len(history)} history items with pagination: {pagination}")
+                return {
+                    "history": history,
+                    "pagination": pagination
+                }
                 
         except Exception as e:
             logger.error(f"Failed to retrieve search history: {e}", exc_info=True)
-            return []
+            return {"history": [], "pagination": {"limit": limit, "offset": offset, "total": 0, "current_page": 1, "total_pages": 0, "has_more": False}}
     
     def get_search_by_id(self, research_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific search by research_id."""

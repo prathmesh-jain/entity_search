@@ -76,6 +76,17 @@ class EntityResearchService:
             self.logger.info("Starting parallel crawling and LLM analysis...")
             urls = [r["url"] for r in search_results]
             total_urls = len(urls)
+            # Emit an initial crawling update so the UI switches phases immediately
+            if progress_callback:
+                try:
+                    progress_callback(phase="crawling", payload={
+                        "message": f"Starting crawling of {total_urls} pages",
+                        "pages_crawled": 0,
+                        "pages_total": total_urls
+                    })
+                except Exception:
+                    # Non-fatal for progress emissions
+                    pass
             
             # Shared data structures for collecting results
             profiles: List[Dict[str, Any]] = []
@@ -336,16 +347,19 @@ class EntityResearchService:
                     # Include profile if it has other meaningful data
                     filtered_profiles.append(profile)
 
+            # Ensure deterministic ordering of sources by their assigned ID
+            sources_meta_sorted = sorted(sources_meta, key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
+
             result = {
                 'entity_name': entity_name,
                 'search_queries': search_queries,
                 'search_results_count': len(search_results),
-                'crawled_pages_count': pages_crawled,
+                'crawled_pages_count': completed_count,
                 'clusters': filtered_clusters,
                 'profiles': filtered_profiles,
                 'final_entities': final_entities,
                 'per_field_sources': {k: sorted(list(v)) for k, v in per_field_sources.items()},
-                'sources': sources_meta
+                'sources': sources_meta_sorted
             }
             
             self.logger.info(f"Research completed for {entity_name}")

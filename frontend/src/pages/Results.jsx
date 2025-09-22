@@ -163,7 +163,7 @@ const Results = () => {
       // Start polling once
       poll();
       if (!intervalRef.current) {
-        intervalRef.current = setInterval(poll, 1500);
+        intervalRef.current = setInterval(poll, 750);
       }
     } else if (searchResults) {
       // Synchronous flow compatibility
@@ -386,7 +386,12 @@ const Results = () => {
   if (!isReady) {
     const phases = ["searching", "crawling", "analyzing", "combining"];
     const currentIndex = Math.max(0, phases.indexOf((phase || "searching").toLowerCase()));
-    const pct = (progress?.pages_crawled != null && progress?.pages_total) ? Math.min(100, Math.round((progress.pages_crawled / Math.max(1, progress.pages_total)) * 100)) : (currentIndex + 1) * 20;
+    let pct = (currentIndex + 1) * 20;
+    if ((phase || "").toLowerCase() === "analyzing" && progress?.pages_analyzed != null && progress?.pages_total) {
+      pct = Math.min(100, Math.round((progress.pages_analyzed / Math.max(1, progress.pages_total)) * 100));
+    } else if (progress?.pages_crawled != null && progress?.pages_total) {
+      pct = Math.min(100, Math.round((progress.pages_crawled / Math.max(1, progress.pages_total)) * 100));
+    }
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
         <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-sm" />
@@ -424,9 +429,23 @@ const Results = () => {
             <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
               <div className="bg-blue-600 h-2 transition-all" style={{ width: `${pct}%` }} />
             </div>
-            {progress?.pages_crawled != null && progress?.pages_total != null && (
-              <div className="mt-1 text-xs text-gray-500">{progress.pages_crawled} / {progress.pages_total} pages</div>
-            )}
+            <div className="mt-1 text-xs text-gray-500">
+              {(progress?.pages_crawled != null && progress?.pages_total != null) && (
+                <span>Crawled {progress.pages_crawled} / {progress.pages_total}</span>
+              )}
+              {(progress?.pages_analyzed != null && progress?.pages_total != null) && (
+                <>
+                  {progress?.pages_crawled != null ? <span className="mx-1">•</span> : null}
+                  <span>Analyzed {progress.pages_analyzed} / {progress.pages_total}</span>
+                </>
+              )}
+              {progress?.current_page && (
+                <>
+                  <span className="mx-1">•</span>
+                  <span className="truncate inline-block max-w-[18rem]" title={progress.current_page}>Current: {progress.current_page}</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Recent events */}
@@ -533,8 +552,14 @@ const Results = () => {
                 <p className="text-lg font-semibold capitalize">{phase || 'starting'}</p>
               </div>
               <div className="text-sm text-gray-600">
-                {progress?.pages_crawled != null && progress?.pages_total != null && (
-                  <span>{progress.pages_crawled} / {progress.pages_total} pages</span>
+                {(progress?.pages_crawled != null && progress?.pages_total != null) && (
+                  <span>Crawled {progress.pages_crawled} / {progress.pages_total}</span>
+                )}
+                {(progress?.pages_analyzed != null && progress?.pages_total != null) && (
+                  <>
+                    {progress?.pages_crawled != null ? <span className="mx-1">•</span> : null}
+                    <span>Analyzed {progress.pages_analyzed} / {progress.pages_total}</span>
+                  </>
                 )}
               </div>
             </div>
