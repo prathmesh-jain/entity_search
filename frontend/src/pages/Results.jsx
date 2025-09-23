@@ -784,7 +784,7 @@ const Results = () => {
                         const categoryName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
                         // Get field-specific source IDs from per_field_sources (same as Overview tab)
-                        const fieldSourceIds = per_field_sources[key] || fieldSources[key] || [];
+                        const fieldSourceIds = fieldSources[key] || per_field_sources[key] || [];
 
                         tableRows.push({
                           category: categoryName,

@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import json
 import asyncio
 import logging
+from datetime import datetime
 
 from ...utils.api_key_rotator import get_gemini_rotator
 
@@ -239,7 +240,6 @@ class GeminiClient:
             fields = self._get_fields_for_entity_type(entity_type)
         
         # Get current date for age calculations
-        from datetime import datetime
         current_year = datetime.now().year
         current_date = datetime.now().strftime("%Y-%m-%d")
         
@@ -269,12 +269,15 @@ class GeminiClient:
         
         ADVANCED EXTRACTION RULES:
         
-        DATE & AGE INTELLIGENCE:
-        - If DOB found: Calculate current age as {current_year} - birth_year
-        - If age mentioned: Check article date context - if article is old, adjust age to current
-        - If article has publication date: Extract it and use for age calculations
-        - Example: Article from 2019 mentions "John (25)" → current age ≈ {current_year - 2019 + 25}
-        - Always provide both original_age_mentioned and current_calculated_age
+        DATE, DOB, YOB & AGE NORMALIZATION (SIMPLE STRINGS ONLY):
+        - If the article explicitly states an age with time context (e.g., "55" in 2024), set extracted_info.age to that FIXED value as a STRING, e.g., "55 (as of 2024)".
+        - If DOB is found, compute the precise current age as of CURRENT DATE and set extracted_info.age to a STRING, e.g., "56 (as of {current_date})".
+        - For YOB and DOB fields, return simple strings and include brief context inline when derived, e.g.,
+          * year_of_birth: "1970 (from article)" or "1970 (calculated from 55 as of 2024)"
+          * date_of_birth: "1970-05-12 (from article)"
+        - If both original and calculated values are relevant, you may concatenate in the same field separated by "; ", e.g.,
+          * age: "55 (as of 2024); 56 (as of {current_date})"
+        
         
         CONTEXTUAL VALIDATION:
         - Cross-reference extracted info with search keywords for consistency
@@ -316,6 +319,30 @@ class GeminiClient:
             "keyword_alignment_score": number (0-1),
             "extracted_info": {{
                 {', '.join([f'"{field}": "value or null"' for field in fields])}
+3. Check for acronym consistency
+          4. Verify business context alignment
+        
+        Return STRICT JSON:
+        {{
+            "detected_entity_name": string | null,
+            "aliases": string[],
+            "same_as_input": boolean,
+            "name_similarity_score": number (0-1),
+            "confidence": number (0-1),
+            "keyword_alignment_score": number (0-1),
+            "extracted_info": {{
+                {', '.join([f'"{field}": "value or null"' for field in fields])},
+                "age_detail": {{
+                  "original": {{ "value": number | null, "as_of": number | string | null }},
+                  "calculated": {{ "value": number | null, "value_range": string | null, "as_of": string | null }}
+                }},
+                "yob_detail": {{
+                  "original": {{ "value": number | null }},
+                  "calculated": {{ "value": number | null, "as_of": number | null }}
+                }},
+                "dob_detail": {{
+                  "original": {{ "value": string | null }}
+                }}
             }},
             "article_publication_date": string | null,
             "extraction_notes": string

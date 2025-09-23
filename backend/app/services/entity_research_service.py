@@ -4,6 +4,7 @@ import os
 from typing import List, Dict, Any, Optional, Callable
 from collections import defaultdict
 from difflib import SequenceMatcher
+from datetime import datetime
 import aiohttp
 
 from .search_engine.factory import SearchEngineFactory
@@ -346,6 +347,143 @@ class EntityResearchService:
                 elif any(v for k, v in profile.items() if k != 'extracted_info' and v is not None and v != ""):
                     # Include profile if it has other meaningful data
                     filtered_profiles.append(profile)
+
+            # Build ranked field_sources per entity using member profiles
+            try:
+                if isinstance(final_entities, dict) and isinstance(final_entities.get('entities'), list):
+                    # Helper to normalize names
+                    def _norm(s: Optional[str]) -> str:
+                        return (s or '').strip().lower()
+
+                    # Build mapping: source_url -> profile index
+                    src_to_idx: Dict[str, int] = {}
+                    for i, prof in enumerate(profiles):
+                        url = (prof or {}).get('source_url')
+                        if url and url not in src_to_idx:
+                            src_to_idx[url] = i
+
+                    # Build cluster -> member indexes map using clusters built earlier
+                    cluster_index_map: Dict[str, List[int]] = {}
+                    for cname, cprofiles in (clusters or {}).items():
+                        idxs = []
+                        for p in (cprofiles or []):
+                            url = (p or {}).get('source_url')
+                            if url and url in src_to_idx:
+                                idxs.append(src_to_idx[url])
+                        cluster_index_map[_norm(cname)] = sorted(list(set(idxs)))
+
+                    for ent in final_entities['entities']:
+                        combined_fields = ent.get('combined_fields', {}) or {}
+                        member_indexes = ent.get('member_profile_indexes')
+                        if not member_indexes:
+                            # Infer members when not provided by LLM combine
+                            ent_name_norm = _norm(ent.get('canonical_name'))
+                            best_key = None
+                            best_score = -1.0
+                            # If LLM marked as same as query, prefer the 'query_name' cluster
+                            if ent.get('same_as_query') and 'query_name' in cluster_index_map:
+                                best_key = 'query_name'
+                                best_score = 1.0
+                            else:
+                                for k in cluster_index_map.keys():
+                                    if k in ('uncertain',):
+                                        continue
+                                    score = SequenceMatcher(None, ent_name_norm, k).ratio() if ent_name_norm else 0.0
+                                    if score > best_score:
+                                        best_score = score
+                                        best_key = k
+                            member_indexes = cluster_index_map.get(best_key or '', [])
+                            ent['member_profile_indexes'] = member_indexes
+                        ranked_field_sources: Dict[str, List[int]] = {}
+                        for field_name, field_value in combined_fields.items():
+                            # Collect candidate source IDs with scores
+                            candidate_scores: Dict[int, float] = {}
+                            value_norm = str(field_value).strip().lower() if field_value is not None else ""
+                            for idx in member_indexes:
+                                if not isinstance(idx, int) or idx < 0 or idx >= len(profiles):
+                                    continue
+                                prof = profiles[idx] or {}
+                                extracted = prof.get('extracted_info') or {}
+                                if field_name not in extracted or extracted[field_name] in (None, "", [], {}):
+                                    continue
+                                url = prof.get('source_url')
+                                sid = source_url_to_id.get(url)
+                                if not sid:
+                                    continue
+                                # Scoring
+                                score = 0.0
+                                prof_val = extracted.get(field_name)
+                                prof_val_norm = str(prof_val).strip().lower()
+                                if value_norm and prof_val_norm:
+                                    if prof_val_norm == value_norm:
+                                        score += 5.0  # exact match gets highest boost
+                                    elif value_norm in prof_val_norm or prof_val_norm in value_norm:
+                                        score += 2.0  # partial/substring match
+                                
+                                # Enhanced scoring for date-based fields
+                                # Check if value is explicitly mentioned vs calculated/inferred
+                                if field_name in ['age', 'date_of_birth', 'year_of_birth']:
+                                    prof_val_str = str(prof_val) if prof_val else ""
+                                    
+                                    # Patterns indicating explicitly mentioned in article
+                                    explicit_patterns = [
+                                        '(from article)',
+                                        '(as of 20',  # e.g., "55 (as of 2024)" - directly stated age
+                                        '(stated)',
+                                        '(mentioned)'
+                                    ]
+                                    
+                                    # Patterns indicating calculated/inferred values
+                                    calculated_patterns = [
+                                        '(calculated',
+                                        '(computed',
+                                        '(inferred',
+                                        '(derived',
+                                        f'(as of {datetime.now().strftime("%Y-%m-%d")})'  # Current date calculation
+                                    ]
+                                    
+                                    # Check if explicitly mentioned (higher priority)
+                                    is_explicit = any(pattern in prof_val_str for pattern in explicit_patterns)
+                                    # For age, if it has "as of" with a year (not current date), it's from article
+                                    if field_name == 'age' and '(as of 20' in prof_val_str and f'(as of {datetime.now().strftime("%Y-%m-%d")})' not in prof_val_str:
+                                        is_explicit = True
+                                    
+                                    # Check if calculated
+                                    is_calculated = any(pattern in prof_val_str for pattern in calculated_patterns)
+                                    
+                                    # Apply bonus/penalty based on source type
+                                    if is_explicit:
+                                        score += 3.0  # Significant boost for explicitly mentioned values
+                                        self.logger.debug(f"Field {field_name}: +3.0 for explicit value in source {sid}")
+                                    elif is_calculated:
+                                        score -= 1.0  # Slight penalty for calculated values
+                                        self.logger.debug(f"Field {field_name}: -1.0 for calculated value in source {sid}")
+                                
+                                # If this profile explicitly marked this field
+                                field_src_map = prof.get('field_sources') or {}
+                                if isinstance(field_src_map, dict) and field_name in field_src_map:
+                                    score += 2.0
+                                # Add confidence/name similarity signals if present
+                                try:
+                                    score += float(prof.get('confidence') or 0.0) * 1.5
+                                except Exception:
+                                    pass
+                                try:
+                                    score += float(prof.get('name_similarity_score') or 0.0) * 1.0
+                                except Exception:
+                                    pass
+                                # Keep max score per source id
+                                candidate_scores[sid] = max(candidate_scores.get(sid, 0.0), score)
+                            if candidate_scores:
+                                ordered = sorted(candidate_scores.items(), key=lambda kv: (-kv[1], kv[0]))
+                                ranked_field_sources[field_name] = [sid for sid, _ in ordered]
+                        # Replace or set entity field_sources with ranked list
+                        if ranked_field_sources:
+                            ent['field_sources'] = ranked_field_sources
+            except Exception as e:
+                self.logger.debug(f"field_sources ranking error: {e}")
+
+            # Removed code-based age/YOB/DOB normalization to rely on LLM-provided normalization
 
             # Ensure deterministic ordering of sources by their assigned ID
             sources_meta_sorted = sorted(sources_meta, key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
