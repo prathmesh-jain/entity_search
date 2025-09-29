@@ -176,6 +176,66 @@ class GeminiClient:
         #     ])
         
         return base_queries[:4]  # Return up to 4 queries
+
+    async def generate_search_queries_from_paragraph(
+        self,
+        entity_name: str,
+        entity_type: str,
+        paragraph: str,
+        num_queries: int = 4
+    ) -> List[str]:
+        """Generate search queries from an unstructured paragraph context."""
+        try:
+            entity_context = "person" if entity_type == "individual" else "company/organization"
+            prompt = f"""
+            You are an expert query generator. Create highly effective web search queries to research the following {entity_context}.
+
+            TARGET ENTITY: {entity_name}
+            ENTITY TYPE: {entity_type}
+
+            CONTEXT PARAGRAPH:
+            ---
+            {paragraph}
+            ---
+
+            Rules:
+            - Generate concise, diverse queries that combine the entity name with the most salient attributes, roles, locations, dates, and identifiers found in the paragraph.
+            - Prefer exact phrases in quotes when appropriate (e.g., "Chief Technology Officer").
+            - Mix informational intents: biography/profile, recent news, positions/roles, DOB/age (for individuals), incorporation/registration (for companies).
+            - Avoid duplicates or trivial variations.
+
+            Generate exactly {num_queries} queries. Return ONLY the queries, one per line, without numbering or extra text.
+            """
+
+            response = await self._chat_completion_with_retry(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.5,
+                max_tokens=8000
+            )
+
+            if not response or not response.choices:
+                logger.warning("Empty response from LLM paragraph query generation - falling back to entity-only queries")
+                return [entity_name][:num_queries]
+
+            text = (response.choices[0].message.content or "").strip()
+            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            cleaned = []
+            for ln in lines:
+                ln2 = ln
+                # Remove common numbering prefixes like '1. ', '1) '
+                if len(ln2) >= 2 and ln2[0].isdigit() and ln2[1] in [')', '.']:
+                    ln2 = ln2[2:].strip()
+                elif len(ln2) >= 3 and ln2[:2].isdigit() and ln2[2] in [')', '.']:
+                    ln2 = ln2[3:].strip()
+                ln2 = ln2.replace('\u2022', '').strip()
+                cleaned.append(ln2)
+            queries = [q for q in cleaned if q]
+            if not queries:
+                return [entity_name][:num_queries]
+            return queries[:num_queries]
+        except Exception as e:
+            logger.error(f"Error generating queries from paragraph: {e}")
+            return [entity_name][:num_queries]
     
     def _get_fields_for_entity_type(self, entity_type: str) -> List[str]:
         """Get appropriate extraction fields based on entity type."""
@@ -307,19 +367,6 @@ class GeminiClient:
           1. Remove common suffixes
           2. Compare core names character by character
           3. Check for acronym consistency
-          4. Verify business context alignment
-        
-        Return STRICT JSON:
-        {{
-            "detected_entity_name": string | null,
-            "aliases": string[],
-            "same_as_input": boolean,
-            "name_similarity_score": number (0-1),
-            "confidence": number (0-1),
-            "keyword_alignment_score": number (0-1),
-            "extracted_info": {{
-                {', '.join([f'"{field}": "value or null"' for field in fields])}
-3. Check for acronym consistency
           4. Verify business context alignment
         
         Return STRICT JSON:

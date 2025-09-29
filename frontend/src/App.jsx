@@ -5,6 +5,7 @@ import Home from './pages/Home';
 import Search from './pages/Search';
 import Results from './pages/Results';
 import History from './pages/History';
+import ParagraphSearch from './pages/ParagraphSearch';
 
 function App() {
   return (
@@ -15,6 +16,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/search" element={<Search />} />
+            <Route path="/search-paragraph" element={<ParagraphSearch />} />
             <Route path="/results" element={<Results />} />
             <Route path="/history" element={<History />} />
           </Routes>

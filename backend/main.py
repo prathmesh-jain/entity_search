@@ -56,6 +56,10 @@ class SearchRequest(BaseModel):
         None,
         description="Optional list of specific search queries to use"
     )
+    paragraph: Optional[str] = Field(
+        None,
+        description="Optional paragraph with detailed context; when provided, LLM will generate search queries from it"
+    )
     
     @validator('entity_type')
     def validate_entity_type(cls, v):
@@ -106,12 +110,25 @@ async def research_entity(
     try:
         logger.info(f"Starting synchronous research for entity: {request.entity_name}")
         
+        # If a paragraph is provided, generate queries from it using LLM
+        final_search_queries = request.search_queries or None
+        try:
+            if request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip():
+                final_search_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
+                    request.entity_name,
+                    request.entity_type,
+                    request.paragraph,
+                    num_queries=4
+                )
+        except Exception as e:
+            logger.warning(f"Paragraph-based query generation failed, falling back: {e}")
+
         # Save search start to history
         history_db.save_search_start(
             research_id=research_id,
             entity_name=request.entity_name,
             entity_type=request.entity_type,
-            search_queries=request.search_queries,
+            search_queries=final_search_queries,
             keywords=request.keywords
         )
         
@@ -119,7 +136,7 @@ async def research_entity(
         results = await research_service.research_entity(
             entity_name=request.entity_name,
             entity_type=request.entity_type,
-            search_queries=request.search_queries or None,
+            search_queries=final_search_queries or None,
             keywords=request.keywords or None
         )
         
@@ -202,12 +219,25 @@ async def research_entity_async(
             "cancelled": False
         }
         
+        # If a paragraph is provided, generate queries from it using LLM
+        final_search_queries = request.search_queries or None
+        try:
+            if request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip():
+                final_search_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
+                    request.entity_name,
+                    request.entity_type,
+                    request.paragraph,
+                    num_queries=4
+                )
+        except Exception as e:
+            logger.warning(f"Paragraph-based query generation failed, falling back: {e}")
+
         # Save search start to history
         history_db.save_search_start(
             research_id=research_id,
             entity_name=request.entity_name,
             entity_type=request.entity_type,
-            search_queries=request.search_queries,
+            search_queries=final_search_queries,
             keywords=request.keywords
         )
         
@@ -218,7 +248,7 @@ async def research_entity_async(
             request.entity_type,
             research_service,
             request.keywords or None,
-            request.search_queries or None,
+            final_search_queries or None,
             history_db
         )
         # Initial SSE state push (if listeners present)

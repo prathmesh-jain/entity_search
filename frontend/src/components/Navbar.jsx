@@ -25,6 +25,7 @@ const Navbar = () => {
   const navigation = [
     { name: 'Home', href: '/', current: location.pathname === '/' },
     { name: 'Search', href: '/search', current: location.pathname === '/search' },
+    { name: 'Paragraph Search', href: '/search-paragraph', current: location.pathname === '/search-paragraph' },
     { name: 'History', href: '/history', current: location.pathname === '/history' },
   ];
 
