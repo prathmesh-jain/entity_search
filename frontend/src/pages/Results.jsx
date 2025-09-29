@@ -10,6 +10,41 @@ import {
 } from '@heroicons/react/24/outline';
 import { Fragment, useEffect, useRef, useState } from 'react';
 
+// Preferred field order for displaying entity details
+const PREFERRED_FIELD_ORDER = [
+  'age',
+  'year_of_birth',
+  'yob',
+  'date_of_birth',
+  'dob',
+  'full_name',
+  'gender',
+  'nationality',
+  'occupation',
+  'job_title',
+  'employer',
+  'educational_background',
+  'professional_background',
+  'employment_history',
+  'place_of_birth',
+  'residence_location',
+  'citizenship',
+  'aliases',
+  'contact_information'
+];
+const FIELD_ORDER_INDEX = PREFERRED_FIELD_ORDER.reduce((acc, key, idx) => {
+  acc[key] = idx;
+  return acc;
+}, {});
+const compareFieldKeys = (a, b) => {
+  const aKey = Array.isArray(a) ? a[0] : a;
+  const bKey = Array.isArray(b) ? b[0] : b;
+  const idxA = (FIELD_ORDER_INDEX[aKey] !== undefined) ? FIELD_ORDER_INDEX[aKey] : Number.MAX_SAFE_INTEGER;
+  const idxB = (FIELD_ORDER_INDEX[bKey] !== undefined) ? FIELD_ORDER_INDEX[bKey] : Number.MAX_SAFE_INTEGER;
+  if (idxA !== idxB) return idxA - idxB;
+  return String(aKey).localeCompare(String(bKey));
+};
+
 // Expandable Array Component
 const ExpandableArray = ({ items }) => {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -124,7 +159,7 @@ const Results = () => {
   const researchIdFromUrl = urlParams.get('research_id');
   const finalResearchId = researchId || researchIdFromUrl;
 
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTab] = useState('entities');
   const [sourcesPage, setSourcesPage] = useState(1);
   const [sourcesPerPage, setSourcesPerPage] = useState(10);
   const [isExporting, setIsExporting] = useState(false);
@@ -134,11 +169,77 @@ const Results = () => {
   const [events, setEvents] = useState([]);
   const [finalResults, setFinalResults] = useState(searchResults ? searchResults.results : null);
   const [headerMeta, setHeaderMeta] = useState({ search_id: finalResearchId || 'N/A', timestamp: new Date().toISOString() });
+  const sseRef = useRef(null);
+  const [sseConnected, setSseConnected] = useState(false);
 
-  // Polling for async research (stop when completed)
+  // SSE stream subscription for live updates
+  useEffect(() => {
+    if (!finalResearchId) return;
+    try {
+      const es = new EventSource(`http://localhost:8000/research-stream/${finalResearchId}`);
+      sseRef.current = es;
+
+      es.addEventListener('state', (event) => {
+        try {
+          const data = JSON.parse(event.data || '{}');
+          setStatus(data.status);
+          setPhase(data.phase || '');
+          setProgress(data.progress || {});
+          setEvents(data.events || []);
+          setHeaderMeta({ search_id: finalResearchId, timestamp: data.started_at || new Date().toISOString() });
+          if (data.live_results) {
+            setFinalResults(data.live_results);
+          }
+          setSseConnected(true);
+        } catch (e) {
+          console.warn('SSE state parse error', e);
+        }
+      });
+
+      es.addEventListener('snapshot', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          if (payload && payload.result) {
+            setFinalResults(payload.result);
+          }
+        } catch (e) {
+          console.warn('SSE snapshot parse error', e);
+        }
+      });
+
+      es.addEventListener('done', (event) => {
+        try {
+          const payload = JSON.parse(event.data || '{}');
+          setStatus(payload.status || 'completed');
+          if (payload.results) {
+            setFinalResults(payload.results);
+          }
+        } catch (e) {
+          console.warn('SSE done parse error', e);
+        } finally {
+          setSseConnected(false);
+          try { es.close(); } catch (_) {}
+        }
+      });
+
+      es.onerror = () => {
+        setSseConnected(false);
+        try { es.close(); } catch (_) {}
+      };
+
+      return () => {
+        try { es.close(); } catch (_) {}
+        sseRef.current = null;
+      };
+    } catch (e) {
+      console.error('SSE connect error', e);
+    }
+  }, [finalResearchId]);
+
+  // Polling for async research (fallback when SSE is not connected)
   const intervalRef = useRef(null);
   useEffect(() => {
-    if (finalResearchId) {
+    if (finalResearchId && !sseConnected) {
       const poll = async () => {
         try {
           const res = await fetch(`http://localhost:8000/research-status/${finalResearchId}`);
@@ -149,6 +250,10 @@ const Results = () => {
           setProgress(data.progress || {});
           setEvents(data.events || []);
           setHeaderMeta({ search_id: data.research_id, timestamp: data.started_at });
+          // Use live partial results while processing (so UI can render early)
+          if (data.live_results) {
+            setFinalResults(data.live_results);
+          }
           if (data.status === 'completed') {
             setFinalResults(data.results);
             if (intervalRef.current) {
@@ -170,8 +275,6 @@ const Results = () => {
       setStatus('completed');
       setFinalResults(searchResults.results || searchResults);
       setHeaderMeta({ search_id: searchResults.search_id || 'N/A', timestamp: searchResults.timestamp });
-    } else {
-      navigate('/');
     }
     return () => {
       if (intervalRef.current) {
@@ -179,8 +282,8 @@ const Results = () => {
         intervalRef.current = null;
       }
     };
-  }, [researchId, searchResults, navigate]);
-  console.log("finalResults -> ", finalResults);
+  }, [finalResearchId, researchId, searchResults, navigate, sseConnected]);
+    console.log("finalResults -> ", finalResults);
 
   const entity_name = finalResults?.entity_name || '';
   const sources = finalResults?.sources || [];
@@ -215,19 +318,28 @@ const Results = () => {
     navigate('/search');
   };
 
-  const handleExport = async () => {
-    setIsExporting(true);
+  const handleStop = async () => {
+    if (!finalResearchId) return;
     try {
-      // Simulate API call for export
-      await new Promise(resolve => setTimeout(resolve, 1500));
-      // In a real app, you would trigger a file download here
-      console.log('Exporting data:', data);
-    } catch (error) {
-      console.error('Export failed:', error);
-    } finally {
-      setIsExporting(false);
+      await fetch(`http://localhost:8000/research-cancel/${finalResearchId}`, { method: 'POST' });
+    } catch (e) {
+      console.error('Cancel error', e);
     }
   };
+
+  // const handleExport = async () => {
+  //   setIsExporting(true);
+  //   try {
+  //     // Simulate API call for export
+  //     await new Promise(resolve => setTimeout(resolve, 1500));
+  //     // In a real app, you would trigger a file download here
+  //     console.log('Exporting data:', data);
+  //   } catch (error) {
+  //     console.error('Export failed:', error);
+  //   } finally {
+  //     setIsExporting(false);
+  //   }
+  // };
 
   const formatDate = (dateString) => {
     if (!dateString) return 'N/A';
@@ -340,7 +452,7 @@ const Results = () => {
 
   const clustersCount = Object.values(clusters || {}).reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
   const tabs = [
-    { name: 'Overview', id: 'overview' },
+    // { name: 'Overview', id: 'overview' },
     // { name: 'Details', id: 'details' },
     { name: 'Entities', id: 'entities', count: final_entities.length || 0 },
     { name: 'Clusters', id: 'clusters', count: clustersCount },
@@ -355,8 +467,33 @@ const Results = () => {
     if ((sources?.length || 0) > 0) return true;
     return false;
   };
-  const isReady = status === 'completed' && hasMeaningfulData();
+  // As soon as we have meaningful data (even partial), render the page
+  const isReady = hasMeaningfulData();
   const isCompletedNoData = status === 'completed' && !hasMeaningfulData();
+
+  // Missing context (no research id and no sync results) -> show inline message
+  if (!finalResearchId && !searchResults) {
+    return (
+      <div className="min-h-screen bg-gradient-to-b from-gray-50 to-gray-100 flex items-center justify-center p-6">
+        <div className="w-full max-w-xl bg-white shadow-lg rounded-2xl p-8 text-center">
+          <div className="mx-auto h-12 w-12 rounded-full bg-gray-100 flex items-center justify-center">
+            <InformationCircleIcon className="h-6 w-6 text-gray-500" />
+          </div>
+          <h2 className="mt-4 text-lg font-semibold text-gray-900">Missing research context</h2>
+          <p className="mt-2 text-sm text-gray-600">No research ID was provided. Please start a new search.</p>
+          <div className="mt-6">
+            <button
+              onClick={() => navigate('/search')}
+              className="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+            >
+              <MagnifyingGlassIcon className="-ml-1 mr-2 h-5 w-5" />
+              Go to Search
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   // Completed but no data: show empty state
   if (isCompletedNoData) {
@@ -382,7 +519,7 @@ const Results = () => {
     );
   }
 
-  // Loader view before results are ready
+  // Loader view before any results are ready
   if (!isReady) {
     const phases = ["searching", "crawling", "analyzing", "combining"];
     const currentIndex = Math.max(0, phases.indexOf((phase || "searching").toLowerCase()));
@@ -543,24 +680,34 @@ const Results = () => {
       </div>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Loader / Phase Indicator */}
-        {status !== 'completed' && (
+        {/* Loader / Phase Indicator + Stop */}
+        {(['pending','in_progress','starting','cancelling'].includes((status || '').toLowerCase())) && (
           <div className="mb-6 rounded-lg bg-white p-4 shadow">
             <div className="flex items-center justify-between">
               <div>
                 <p className="text-sm text-gray-600">Current phase</p>
                 <p className="text-lg font-semibold capitalize">{phase || 'starting'}</p>
               </div>
-              <div className="text-sm text-gray-600">
-                {(progress?.pages_crawled != null && progress?.pages_total != null) && (
-                  <span>Crawled {progress.pages_crawled} / {progress.pages_total}</span>
-                )}
-                {(progress?.pages_analyzed != null && progress?.pages_total != null) && (
-                  <>
-                    {progress?.pages_crawled != null ? <span className="mx-1">•</span> : null}
-                    <span>Analyzed {progress.pages_analyzed} / {progress.pages_total}</span>
-                  </>
-                )}
+              <div className="flex items-center space-x-4">
+                <button
+                  onClick={handleStop}
+                  disabled={!finalResearchId}
+                  className="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-md shadow-sm text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 disabled:opacity-50"
+                  title="Stop processing"
+                >
+                  Stop
+                </button>
+                <div className="text-sm text-gray-600">
+                  {(progress?.pages_crawled != null && progress?.pages_total != null) && (
+                    <span>Crawled {progress.pages_crawled} / {progress.pages_total}</span>
+                  )}
+                  {(progress?.pages_analyzed != null && progress?.pages_total != null) && (
+                    <>
+                      {progress?.pages_crawled != null ? <span className="mx-1">•</span> : null}
+                      <span>Analyzed {progress.pages_analyzed} / {progress.pages_total}</span>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
             {events?.length > 0 && (
@@ -584,23 +731,12 @@ const Results = () => {
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.2 }}
           >
-            {activeTab === 'overview' && (
-              <div className="space-y-8">
-                {/* Entity Summary Card */}
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 overflow-hidden shadow-lg rounded-xl border border-blue-100">
-                  <div className="px-5 py-5">
-                    <div className="flex items-center justify-between mb-6">
-                      <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
-                        <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
-                        Entity Summary
-                      </h3>
-                      <div className="text-sm text-gray-500 bg-white px-3 py-1 rounded-full shadow-sm">
-                        Research Complete
-                      </div>
-                    </div>
+            
 
-                    {/* Search Keywords Display */}
-                    {search_keywords && search_keywords.length > 0 && (
+            {activeTab === 'entities' && (
+              <div className="space-y-8">
+                {/* Search Keywords Display */}
+                {search_keywords && search_keywords.length > 0 && (
                       <div className="mb-6 p-3 bg-white rounded-lg border border-blue-200">
                         <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center">
                           <svg className="w-4 h-4 mr-2 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -617,140 +753,6 @@ const Results = () => {
                         </div>
                       </div>
                     )}
-
-                    <div className="grid grid-cols-1 gap-6 sm:grid-cols-3">
-                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-                        <div className="flex items-center">
-                          <div className="flex-shrink-0">
-                            <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
-                              <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                              </svg>
-                            </div>
-                          </div>
-                          <div className="ml-4">
-                            <dt className="text-sm font-medium text-gray-500">Entity Name</dt>
-                            <dd className="mt-1 text-xl font-semibold text-gray-900">{entity_name || 'N/A'}</dd>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-                        <div className="flex items-center">
-                          <div className="flex-shrink-0">
-                            <div className="w-8 h-8 bg-green-100 rounded-lg flex items-center justify-center">
-                              <svg className="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                              </svg>
-                            </div>
-                          </div>
-                          <div className="ml-4">
-                            <dt className="text-sm font-medium text-gray-500">Search Results</dt>
-                            <dd className="mt-1 text-xl font-semibold text-gray-900">{search_results_count || 0}</dd>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="bg-white rounded-xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
-                        <div className="flex items-center">
-                          <div className="flex-shrink-0">
-                            <div className="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
-                              <svg className="w-5 h-5 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                              </svg>
-                            </div>
-                          </div>
-                          <div className="ml-4">
-                            <dt className="text-sm font-medium text-gray-500">Pages Crawled</dt>
-                            <dd className="mt-1 text-xl font-semibold text-gray-900">{crawled_pages_count || 0}</dd>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Entity Information */}
-                <div className="bg-white shadow-lg overflow-hidden rounded-xl border border-gray-100">
-                  <div className="px-6 py-5 bg-gradient-to-r from-blue-50 to-indigo-50">
-                    <h3 className="text-xl leading-6 font-bold text-gray-900 flex items-center">
-                      <div className="w-3 h-3 bg-blue-500 rounded-full mr-3"></div>
-                      Detailed Information
-                    </h3>
-                    <p className="mt-2 text-sm text-gray-600">
-                      Comprehensive details extracted from various sources with source attribution.
-                    </p>
-                  </div>
-                  <div className="px-5 py-5">
-                    {(!basic_info || Object.keys(basic_info).length === 0) ? (
-                      <div className="text-center py-12">
-                        <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                          <svg className="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                          </svg>
-                        </div>
-                        <h3 className="text-lg font-medium text-gray-900 mb-2">No detailed information</h3>
-                        <p className="text-gray-500">No comprehensive details available from sources.</p>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        {Object.entries(basic_info).map(([key, value]) => (
-                          value &&
-                          <div key={key} className="bg-gradient-to-r from-white to-gray-50 border border-gray-200 rounded-lg p-3 hover:shadow-md transition-all duration-200">
-                            <div className="flex items-start justify-between">
-                              <div className="flex-1">
-                                <dt className="text-sm font-bold text-gray-700 capitalize mb-2 flex items-center">
-                                  <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center mr-3">
-                                    <svg className="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                    </svg>
-                                  </div>
-                                  {key.replace(/_/g, ' ')}
-                                </dt>
-                                <dd className="text-sm text-gray-900 ml-11">
-                                  <div className="bg-white p-2 rounded border border-gray-100">
-                                    {Array.isArray(value) ? (
-                                      <div className="flex flex-wrap gap-2">
-                                        {value.map((item, idx) => (
-                                          <span key={idx} className="inline-block bg-indigo-50 text-indigo-800 px-2 py-1 rounded text-xs font-semibold">
-                                            {typeof item === 'object' && item !== null ? renderNestedObject(item) : String(item)}
-                                          </span>
-                                        ))}
-                                      </div>
-                                    ) : typeof value === 'object' && value !== null ? (
-                                      renderValue(value)
-                                    ) : (
-                                      <span className="text-gray-900">{String(value || 'N/A')}</span>
-                                    )}
-                                  </div>
-                                  {per_field_sources && per_field_sources[key] && per_field_sources[key].length > 0 && (
-                                    <div className="mt-2 p-2 bg-gray-50 rounded border border-gray-100">
-                                      <span className="text-xs font-semibold text-gray-600 mb-2 block">Verified Sources:</span>
-                                      <div className="flex flex-wrap gap-2">
-                                        {per_field_sources[key].map((sourceId, idx) => (
-                                          <a key={idx} href={getSourceUrl(sourceId)} target="_blank" rel="noopener noreferrer"
-                                            className="inline-flex items-center px-2 py-1 bg-blue-100 hover:bg-blue-200 text-blue-700 rounded text-xs transition-colors">
-                                            <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                            </svg>
-                                            Source {sourceId}
-                                          </a>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  )}
-                                </dd>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'entities' && (
-              <div className="space-y-8">
                 {(!final_entities || final_entities.length === 0) ? (
                   <div className="bg-white shadow overflow-hidden sm:rounded-lg">
                     <div className="text-center py-12">
@@ -771,28 +773,30 @@ const Results = () => {
 
                     // Convert fields to table rows
                     const tableRows = [];
-                    Object.entries(fields).forEach(([key, value]) => {
-                      if (value && value !== '' && value !== null) {
-                        let displayValue;
-                        if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
-                          // Use the improved renderNestedObject function for complex data
-                          displayValue = renderNestedObject(value);
-                        } else {
-                          displayValue = String(value);
+                    Object.entries(fields)
+                      .sort(compareFieldKeys)
+                      .forEach(([key, value]) => {
+                        if (value && value !== '' && value !== null) {
+                          let displayValue;
+                          if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+                            // Use the improved renderNestedObject function for complex data
+                            displayValue = renderNestedObject(value);
+                          } else {
+                            displayValue = String(value);
+                          }
+
+                          const categoryName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+
+                          // Get field-specific source IDs from per_field_sources (same as Overview tab)
+                          const fieldSourceIds = fieldSources[key] || per_field_sources[key] || [];
+
+                          tableRows.push({
+                            category: categoryName,
+                            details: displayValue,
+                            sources: fieldSourceIds.slice(0, 3) // Show up to 3 source IDs per field
+                          });
                         }
-
-                        const categoryName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-
-                        // Get field-specific source IDs from per_field_sources (same as Overview tab)
-                        const fieldSourceIds = fieldSources[key] || per_field_sources[key] || [];
-
-                        tableRows.push({
-                          category: categoryName,
-                          details: displayValue,
-                          sources: fieldSourceIds.slice(0, 3) // Show up to 3 source IDs per field
-                        });
-                      }
-                    });
+                      });
 
                     return (
                       <div key={entityIndex} className="bg-white shadow overflow-hidden sm:rounded-lg border-gray-100 border">
@@ -822,6 +826,12 @@ const Results = () => {
                                 : 'bg-yellow-100 text-yellow-800'
                                 }`}>
                                 {entity.same_as_query ? '✓ Exact Match' : '~ Similar Match'}
+                                {typeof entity.name_similarity_to_query === 'number' && (
+                                  <>
+                                    {' '}
+                                    ({Math.round((entity.name_similarity_to_query || 0) * 100)}%)
+                                  </>
+                                )}
                               </span>
                               {entitySources.length > 0 && (
                                 <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
@@ -969,7 +979,7 @@ const Results = () => {
                                   <div className="border-t border-gray-100 pt-3">
                                     <h6 className="text-xs font-semibold text-gray-600 mb-2">Key Information:</h6>
                                     <div className="grid grid-cols-1 gap-2">
-                                      {Object.entries(p.extracted_info).slice(0, 4).map(([k, v]) => (
+                                      {Object.entries(p.extracted_info).sort(compareFieldKeys).slice(0, 4).map(([k, v]) => (
                                         <div key={k} className="flex justify-between items-start">
                                           <span className="text-xs font-medium text-gray-600 capitalize">{k.replace(/_/g, ' ')}:</span>
                                           <span className="text-xs text-gray-900 ml-2 text-right">

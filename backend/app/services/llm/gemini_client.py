@@ -331,18 +331,7 @@ class GeminiClient:
             "confidence": number (0-1),
             "keyword_alignment_score": number (0-1),
             "extracted_info": {{
-                {', '.join([f'"{field}": "value or null"' for field in fields])},
-                "age_detail": {{
-                  "original": {{ "value": number | null, "as_of": number | string | null }},
-                  "calculated": {{ "value": number | null, "value_range": string | null, "as_of": string | null }}
-                }},
-                "yob_detail": {{
-                  "original": {{ "value": number | null }},
-                  "calculated": {{ "value": number | null, "as_of": number | null }}
-                }},
-                "dob_detail": {{
-                  "original": {{ "value": string | null }}
-                }}
+                {', '.join([f'"{field}": "value or null"' for field in fields])}
             }},
             "article_publication_date": string | null,
             "extraction_notes": string
@@ -400,6 +389,65 @@ class GeminiClient:
             article_date = result.get("article_publication_date")
             extraction_notes = result.get("extraction_notes", "")
             
+            # Flatten nested details for date/age fields into simple strings
+            try:
+                if isinstance(extracted_info, dict):
+                    # AGE
+                    age_detail = extracted_info.get("age_detail")
+                    if age_detail and isinstance(age_detail, dict):
+                        age_parts = []
+                        orig = age_detail.get("original")
+                        calc = age_detail.get("calculated")
+                        if isinstance(orig, dict):
+                            val = orig.get("value")
+                            as_of = orig.get("as_of")
+                            if val is not None and val != "":
+                                text = f"{str(val)}"
+                                if as_of not in (None, ""):
+                                    text += f" (as of {as_of})"
+                                age_parts.append(text)
+                        if isinstance(calc, dict):
+                            val = calc.get("value")
+                            as_of = calc.get("as_of")
+                            if val is not None and val != "":
+                                text = f"{str(val)}"
+                                if as_of not in (None, ""):
+                                    text += f" (as of {as_of})"
+                                text += " (calculated)"
+                                age_parts.append(text)
+                        # Prefer original first if present
+                        if age_parts and (not extracted_info.get("age") or extracted_info.get("age") in (None, "")):
+                            extracted_info["age"] = "; ".join(age_parts)
+                        # Remove nested
+                        extracted_info.pop("age_detail", None)
+
+                    # YEAR OF BIRTH
+                    yob_detail = extracted_info.get("yob_detail")
+                    if yob_detail and isinstance(yob_detail, dict):
+                        yob_text = None
+                        orig = yob_detail.get("original")
+                        calc = yob_detail.get("calculated")
+                        if isinstance(orig, dict) and orig.get("value") not in (None, ""):
+                            yob_text = f"{str(orig.get('value'))} (from article)"
+                        elif isinstance(calc, dict) and calc.get("value") not in (None, ""):
+                            yob_text = f"{str(calc.get('value'))} (calculated)"
+                        if yob_text and (not extracted_info.get("year_of_birth") or extracted_info.get("year_of_birth") in (None, "")):
+                            extracted_info["year_of_birth"] = yob_text
+                        extracted_info.pop("yob_detail", None)
+
+                    # DATE OF BIRTH
+                    dob_detail = extracted_info.get("dob_detail")
+                    if dob_detail and isinstance(dob_detail, dict):
+                        dob_text = None
+                        orig = dob_detail.get("original")
+                        if isinstance(orig, dict) and orig.get("value") not in (None, ""):
+                            dob_text = f"{str(orig.get('value'))} (from article)"
+                        if dob_text and (not extracted_info.get("date_of_birth") or extracted_info.get("date_of_birth") in (None, "")):
+                            extracted_info["date_of_birth"] = dob_text
+                        extracted_info.pop("dob_detail", None)
+            except Exception as e:
+                logger.debug(f"Flatten date fields failed: {e}")
+
             # Build field-specific sources - each field that has data gets the source URL
             field_sources = {}
             # Get source URL from kwargs if provided, otherwise default to "web"
@@ -665,6 +713,12 @@ class GeminiClient:
                 "6. TEMPORAL CONSISTENCY: Check age progression and timeline consistency\n"
                 "7. BUSINESS CONTEXT: Different business types/industries require additional validation\n"
                 "8. ULTRA-CONSERVATIVE: When ANY doubt exists, keep separate - precision over recall\n\n"
+                "STRICT NAME FILTERING:\n"
+                "- Do NOT include entities whose FIRST NAME token differs from the query's first token (e.g., 'Anthony' vs 'Charles'), unless there is an explicit alias mapping.\n"
+                "- Do NOT return entities with name_similarity_to_query < 0.90; treat them as different people.\n"
+                "- Variants like middle initials, small spelling variations (1-2 chars) are acceptable if similarity ≥ 0.95.\n\n"
+                "SCOPE CLARIFICATION:\n"
+                "- Focus on the mentioned entity only. If relationships are relevant (e.g., relatives with same last name), mention them in consolidation_notes, NOT as separate entities.\n\n"
                 "ENHANCED VALIDATION:\n"
                 "- Name similarity must be calculated and ≥0.95 for merging\n"
                 "- Core business name components must be identical\n"

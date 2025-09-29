@@ -33,9 +33,14 @@ class EntityResearchService:
         )
         self.crawler = BaseCrawler(max_concurrent=max_concurrent_requests, request_delay=0.1)
         self.llm_client = GeminiClient()
+        # Cap concurrent LLM calls to avoid rate limits
+        try:
+            self.llm_semaphore = asyncio.Semaphore(int(os.getenv("LLM_CONCURRENCY", "8")))
+        except Exception:
+            self.llm_semaphore = asyncio.Semaphore(8)
         self.logger = logging.getLogger(__name__)
     
-    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None) -> Dict[str, Any]:
+    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None, should_cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         Research an entity by searching the web and analyzing the results.
         
@@ -45,7 +50,8 @@ class EntityResearchService:
             search_queries: Optional list of search queries to use. If not provided,
                           will generate queries based on the entity name.
             keywords: Optional list of keywords to refine the search
-            progress_callback: Optional callback function for progress updates
+            progress_callback: Optional callback function for progress updates. May receive payload key 'result_snapshot' containing a partial results structure for UI.
+            should_cancel: Optional callable to check if the overall job was cancelled externally (e.g., via API). When True, processing stops early.
                           
         Returns:
             Dictionary containing research results
@@ -95,6 +101,82 @@ class EntityResearchService:
             per_field_sources: Dict[str, set] = {}
             sources_meta: List[Dict[str, Any]] = []
             source_url_to_id: Dict[str, int] = {}
+            early_stop_event = asyncio.Event()
+
+            # Early stop configuration
+            def _norm(s: Optional[str]) -> str:
+                return (s or '').strip().lower()
+
+            # Determine which fields should be considered for early stop
+            env_fields = os.getenv("EARLY_STOP_FIELDS", "").strip()
+            if env_fields:
+                target_fields = set([f.strip() for f in env_fields.split(',') if f.strip()])
+            else:
+                try:
+                    target_fields = set(self.llm_client._get_fields_for_entity_type(entity_type))
+                except Exception:
+                    # Fallback minimal field set
+                    target_fields = set(["full_name", "age", "date_of_birth", "year_of_birth", "gender", "nationality", "location"]) if entity_type == "individual" else set(["full_name", "date_of_incorporation", "location", "ceo_founder"]) 
+
+            name_match_threshold = float(os.getenv("NAME_MATCH_THRESHOLD", "0.9"))
+
+            # Helper to build a partial results snapshot for UI
+            def _build_result_snapshot() -> Dict[str, Any]:
+                try:
+                    # Shallow copies to avoid concurrent mutation surprises
+                    profiles_copy = list(profiles)
+                    clusters_copy = {k: list(v) for k, v in clusters.items()}
+                    per_field_sources_copy = {k: sorted(list(v)) for k, v in per_field_sources.items()}
+                    sources_meta_sorted = sorted(list(sources_meta), key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
+
+                    # Do a quick local consolidation on current profiles
+                    try:
+                        local_entities = self._local_consolidate(entity_name, profiles_copy, source_url_to_id)
+                        final_entities_snapshot = {"entities": local_entities}
+                    except Exception:
+                        final_entities_snapshot = {"entities": []}
+
+                    # Filter clusters and profiles similarly to final pass to avoid empty noise
+                    filtered_clusters = {}
+                    for cluster_name, cluster_profiles in clusters_copy.items():
+                        filtered_profiles = []
+                        for profile in cluster_profiles:
+                            if 'extracted_info' in profile:
+                                filtered_info = {k: v for k, v in (profile.get('extracted_info') or {}).items() if v not in (None, "", [], {})}
+                                if filtered_info:
+                                    fp = dict(profile)
+                                    fp['extracted_info'] = filtered_info
+                                    filtered_profiles.append(fp)
+                            elif any(v for k, v in profile.items() if k != 'extracted_info' and v not in (None, "")):
+                                filtered_profiles.append(profile)
+                        if filtered_profiles:
+                            filtered_clusters[cluster_name] = filtered_profiles
+
+                    filtered_profiles = []
+                    for profile in profiles_copy:
+                        if 'extracted_info' in profile:
+                            filtered_info = {k: v for k, v in (profile.get('extracted_info') or {}).items() if v not in (None, "", [], {})}
+                            if filtered_info:
+                                fp = dict(profile)
+                                fp['extracted_info'] = filtered_info
+                                filtered_profiles.append(fp)
+                        elif any(v for k, v in profile.items() if k != 'extracted_info' and v not in (None, "")):
+                            filtered_profiles.append(profile)
+
+                    return {
+                        'entity_name': entity_name,
+                        'search_queries': search_queries,
+                        'search_results_count': len(search_results),
+                        'crawled_pages_count': completed_count,
+                        'clusters': filtered_clusters,
+                        'profiles': filtered_profiles,
+                        'final_entities': final_entities_snapshot,
+                        'per_field_sources': per_field_sources_copy,
+                        'sources': sources_meta_sorted
+                    }
+                except Exception as e:
+                    self.logger.debug(f"snapshot build error: {e}")
+                    return {}
             
             # Progress tracking for parallel processing
             completed_count = 0
@@ -110,6 +192,9 @@ class EntityResearchService:
             async def process_single_url(url: str, url_index: int) -> None:
                 """Crawl a single URL and immediately process with LLM."""
                 try:
+                    # Respect external cancellation / early stop ASAP
+                    if (should_cancel and should_cancel()) or early_stop_event.is_set():
+                        return
                     # Crawl the page
                     page = await self.crawler._crawl_single(url)
                     
@@ -147,15 +232,16 @@ class EntityResearchService:
                             content_len = len(page.content or "")
                             self.logger.info(f"LLM extract start | url={page.url} | content_len={content_len}")
                             
-                            llm_result = await asyncio.wait_for(
-                                self.llm_client.extract_entity_info(
-                                    content=page.content,
-                                    entity_name=entity_name,
-                                    entity_type=entity_type,
-                                    keywords=keywords
-                                ),
-                                timeout=60  # Reduced from 100s to 30s
-                            )
+                            async with self.llm_semaphore:
+                                llm_result = await asyncio.wait_for(
+                                    self.llm_client.extract_entity_info(
+                                        content=page.content,
+                                        entity_name=entity_name,
+                                        entity_type=entity_type,
+                                        keywords=keywords
+                                    ),
+                                    timeout=60  # Reduced from 100s to 60s
+                                )
                             
                             self.logger.info(
                                 f"LLM extract done | url={page.url} | keys={list((llm_result or {}).keys())}"
@@ -193,6 +279,40 @@ class EntityResearchService:
                                 if value is not None and value != "":
                                     per_field_sources.setdefault(field, set()).add(source_id)
                             
+                            # Emit a partial snapshot for UI (first page and then periodically)
+                            try:
+                                if progress_callback and (len(profiles) == 1 or len(profiles) % 3 == 0):
+                                    snapshot = _build_result_snapshot()
+                                    progress_callback(phase="analyzing", payload={
+                                        "message": f"Partial results updated ({len(profiles)} profiles)",
+                                        "pages_analyzed": len(profiles),
+                                        "pages_total": total_urls,
+                                        "result_snapshot": snapshot
+                                    })
+                            except Exception as e:
+                                self.logger.debug(f"partial snapshot emit error: {e}")
+
+                            # Early stop check based on field coverage and name match
+                            try:
+                                if not early_stop_event.is_set():
+                                    snapshot_entities = self._local_consolidate(entity_name, profiles, source_url_to_id)
+                                    if snapshot_entities:
+                                        best = snapshot_entities[0]
+                                        cname = best.get('canonical_name') or ''
+                                        same_as = bool(best.get('same_as_query'))
+                                        name_ratio = SequenceMatcher(None, _norm(entity_name), _norm(cname)).ratio() if cname else 0.0
+                                        fields_present = set([k for k, v in (best.get('combined_fields') or {}).items() if v not in (None, "", [], {})])
+                                        if (same_as or name_ratio >= name_match_threshold) and target_fields.issubset(fields_present):
+                                            early_stop_event.set()
+                                            if progress_callback:
+                                                progress_callback(phase="combining", payload={
+                                                    "message": "Early stop: target fields satisfied",
+                                                    "profiles_count": len(profiles),
+                                                    "result_snapshot": _build_result_snapshot()
+                                                })
+                            except Exception as e:
+                                self.logger.debug(f"early stop check error: {e}")
+                            
                             # Check if we have enough profiles for streaming consolidation
                             async with consolidation_lock:
                                 if len(profiles) >= consolidation_chunk_size and len(profiles) % consolidation_chunk_size == 0:
@@ -218,8 +338,21 @@ class EntityResearchService:
                 for i, url in enumerate(urls)
             ]
             
-            # Wait for all crawling and LLM processing to complete
-            await asyncio.gather(*tasks, return_exceptions=True)
+            # Process tasks as they complete; cancel remaining on early stop/cancel
+            try:
+                for t in asyncio.as_completed(tasks):
+                    try:
+                        await t
+                    except Exception:
+                        pass
+                    # If early stop or external cancel requested, cancel pending tasks
+                    if early_stop_event.is_set() or (should_cancel and should_cancel()):
+                        for rest in tasks:
+                            if not rest.done():
+                                rest.cancel()
+                        break
+            finally:
+                await asyncio.gather(*tasks, return_exceptions=True)
             
             # Handle remaining profiles that didn't reach chunk size
             async with consolidation_lock:
@@ -347,6 +480,38 @@ class EntityResearchService:
                 elif any(v for k, v in profile.items() if k != 'extracted_info' and v is not None and v != ""):
                     # Include profile if it has other meaningful data
                     filtered_profiles.append(profile)
+
+            # Filter FINAL ENTITIES: remove entities with unknown/empty name or with no meaningful fields
+            try:
+                if isinstance(final_entities, dict) and isinstance(final_entities.get('entities'), list):
+                    unknown_tokens = {"unknown", "unknown entity", "n/a", "na", "null", "undefined"}
+                    kept_entities = []
+                    removed = 0
+                    for ent in final_entities['entities']:
+                        canonical = (ent.get('canonical_name') or '').strip()
+                        combined = ent.get('combined_fields') or {}
+                        # compute meaningful fields
+                        meaningful = {
+                            k: v for k, v in (combined.items() if isinstance(combined, dict) else [])
+                            if v is not None and v != "" and v != [] and v != {}
+                        }
+                        drop_for_name = (not canonical) or (canonical.lower() in unknown_tokens)
+                        drop_for_empty_fields = (len(meaningful) == 0)
+                        # Apply drops (only structural/unknown checks as per requirement)
+                        if drop_for_name:
+                            self.logger.debug(f"drop_entity reason=unknown_name canonical='{canonical}'")
+                            removed += 1
+                            continue
+                        if drop_for_empty_fields:
+                            self.logger.debug(f"drop_entity reason=empty_fields canonical='{canonical}' field_count={len(meaningful)}")
+                            removed += 1
+                            continue
+                        kept_entities.append(ent)
+                    if removed:
+                        self.logger.info(f"Filtered out {removed} empty/unknown final entities (kept {len(kept_entities)})")
+                    final_entities['entities'] = kept_entities
+            except Exception as fe:
+                self.logger.debug(f"final_entities filtering error: {fe}")
 
             # Build ranked field_sources per entity using member profiles
             try:
@@ -916,9 +1081,18 @@ class EntityResearchService:
                     
                     field_sources[field_name] = sorted(list(field_source_ids))
             
+            # Name similarity score to query for display and filtering
+            canonical_name = data["canonical_name"] or (entity_name if k == '__query__' else None)
+            try:
+                name_similarity = SequenceMatcher(None, (entity_name or '').lower(), (canonical_name or '').lower()).ratio() if canonical_name else 0.0
+            except Exception:
+                name_similarity = 0.0
+
             entities.append({
-                "canonical_name": data["canonical_name"] or (entity_name if k == '__query__' else None),
+                "canonical_name": canonical_name,
                 "same_as_query": data["same_as_query"],
+                "name_similarity_to_query": name_similarity,
+                "consolidation_confidence": 0.7 if data["same_as_query"] else max(0.4, name_similarity),
                 "combined_fields": combined_fields,
                 "field_sources": field_sources,  # Sources tied to specific fields
                 "member_profile_indexes": member_indexes,

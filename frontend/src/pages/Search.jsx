@@ -119,14 +119,14 @@ const Search = () => {
         throw new Error(errorMessage);
       }
       
-      if (!data) {
-        throw new Error('Invalid response from server');
+      if (!data || typeof data.research_id !== 'string' || data.research_id.trim() === '') {
+        throw new Error('Invalid response: missing research_id');
       }
-      
-      // Navigate to results page with researchId for polling
-      navigate('/results', { 
+      const rid = data.research_id.trim();
+      // Navigate to results page with researchId for polling (add to query to survive refresh/HMR)
+      navigate(`/results?research_id=${encodeURIComponent(rid)}`, { 
         state: { 
-          researchId: data.research_id
+          researchId: rid
         } 
       });
       

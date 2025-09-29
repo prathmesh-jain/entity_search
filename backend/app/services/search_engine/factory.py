@@ -12,7 +12,7 @@ class SearchEngineFactory:
     
     # Map of search engine names to their corresponding classes
     _engines: Dict[str, Type[BaseSearchEngine]] = {
-        'google': GoogleSearchEngine,
+        # 'google': GoogleSearchEngine,
         'bing': BingSearchEngine,
         'yahoo': YahooSearchEngine,
     }

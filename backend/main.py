@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 from typing import List, Dict, Any, Optional
@@ -8,6 +8,8 @@ import uuid
 import asyncio
 import logging
 from dotenv import load_dotenv
+import json
+from fastapi.responses import StreamingResponse
 
 # Load environment variables
 load_dotenv()
@@ -76,8 +78,8 @@ def get_research_service():
     global _research_service_instance
     if _research_service_instance is None:
         _research_service_instance = EntityResearchService(
-            max_search_results=20,
-            max_concurrent_requests=10
+            max_search_results=20,  # tune as needed based on engines
+            max_concurrent_requests=10  # slightly higher concurrency for faster throughput
         )
     return _research_service_instance
 
@@ -156,6 +158,28 @@ async def research_entity(
             detail=f"An error occurred while processing your request: {str(e)}"
         )
 
+# In-memory SSE subscribers per research_id
+research_streams: Dict[str, set] = {}
+
+def _sse_broadcast(research_id: str, event: str, data: Dict[str, Any]):
+    """Broadcast an event to all SSE subscribers for a research_id."""
+    try:
+        subscribers = list(research_streams.get(research_id, set()))
+        # Build the message once
+        payload = {
+            "event": event,
+            "data": data,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        for q in subscribers:
+            try:
+                q.put_nowait(payload)
+            except Exception:
+                # Drop message for slow/broken subscribers
+                pass
+    except Exception as e:
+        logger.debug(f"SSE broadcast error: {e}")
+
 @app.post("/research-entity-async", response_model=Dict[str, Any])
 async def research_entity_async(
     request: SearchRequest,
@@ -173,7 +197,9 @@ async def research_entity_async(
             "entity_type": request.entity_type,
             "started_at": datetime.now(timezone.utc).isoformat(),
             "results": None,
-            "events": []
+            "live_results": None,
+            "events": [],
+            "cancelled": False
         }
         
         # Save search start to history
@@ -195,6 +221,17 @@ async def research_entity_async(
             request.search_queries or None,
             history_db
         )
+        # Initial SSE state push (if listeners present)
+        _sse_broadcast(research_id, "state", {
+            "status": "pending",
+            "phase": "starting",
+            "progress": {},
+            "events": [],
+            "entity_name": request.entity_name,
+            "started_at": research_results[research_id]["started_at"],
+            "live_results": None,
+        })
+
         return {"research_id": research_id, "status": "started"}
     except Exception as e:
         logger.error(f"Error starting async research: {str(e)}", exc_info=True)
@@ -226,6 +263,8 @@ async def get_research_status(
             "started_at": result["started_at"],
             "completed_at": result.get("completed_at"),
             "results": result.get("results"),
+            "live_results": result.get("live_results"),
+            "cancelled": result.get("cancelled", False),
             "error": result.get("error")
         }
     
@@ -300,6 +339,26 @@ async def perform_research(
                 # Optionally expose small deltas for UI
                 if "clusters_summary" in payload:
                     research_results[research_id]["clusters_summary"] = payload["clusters_summary"]
+                # Live partial results (keep same shape as final 'results')
+                if isinstance(payload, dict) and payload.get("result_snapshot"):
+                    research_results[research_id]["live_results"] = payload.get("result_snapshot")
+                # Broadcast SSE state and snapshot if present
+                try:
+                    _sse_broadcast(research_id, "state", {
+                        "status": research_results[research_id].get("status", "in_progress"),
+                        "phase": phase,
+                        "progress": research_results[research_id].get("progress", {}),
+                        "events": research_results[research_id].get("events", []),
+                        "entity_name": research_results[research_id]["entity_name"],
+                        "started_at": research_results[research_id]["started_at"],
+                        "live_results": research_results[research_id].get("live_results"),
+                    })
+                    if isinstance(payload, dict) and payload.get("result_snapshot"):
+                        _sse_broadcast(research_id, "snapshot", {
+                            "result": payload.get("result_snapshot")
+                        })
+                except Exception:
+                    pass
                 
                 # Update history database with progress
                 if history_db:
@@ -333,7 +392,8 @@ async def perform_research(
                 entity_type=entity_type,
                 search_queries=search_queries,
                 keywords=keywords,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                should_cancel=lambda: bool(research_results.get(research_id, {}).get("cancelled", False))
             )
         finally:
             heartbeat_running = False
@@ -342,17 +402,28 @@ async def perform_research(
             # except Exception:
             #     hb_task.cancel()
 
-        # Store the results
+        # Store the results (respect cancellation)
+        is_cancelled = bool(research_results.get(research_id, {}).get("cancelled", False))
         research_results[research_id].update({
-            "status": "completed",
-            "phase": "completed",
+            "status": "cancelled" if is_cancelled else "completed",
+            "phase": "cancelled" if is_cancelled else "completed",
             "completed_at": datetime.now(timezone.utc).isoformat(),
-            "results": result
+            "results": result if not is_cancelled else research_results[research_id].get("live_results") or result
         })
+        # SSE final event
+        try:
+            _sse_broadcast(research_id, "done", {
+                "status": research_results[research_id]["status"],
+                "results": research_results[research_id].get("results"),
+                "completed_at": research_results[research_id].get("completed_at"),
+                "error": None
+            })
+        except Exception:
+            pass
         
         # Save completion to history
         if history_db:
-            history_db.save_search_completion(research_id, result, "completed")
+            history_db.save_search_completion(research_id, research_results[research_id].get("results"), "cancelled" if is_cancelled else "completed")
         
     except Exception as e:
         logger.error(f"Error in research task {research_id}: {str(e)}", exc_info=True)
@@ -361,6 +432,15 @@ async def perform_research(
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "error": str(e)
         })
+        try:
+            _sse_broadcast(research_id, "done", {
+                "status": "failed",
+                "results": None,
+                "completed_at": research_results[research_id].get("completed_at"),
+                "error": str(e)
+            })
+        except Exception:
+            pass
         
         # Save failure to history
         if history_db:
@@ -453,6 +533,84 @@ async def health_check():
             if r["status"] in ["pending", "in_progress"]
         )
     }
+
+@app.post("/research-cancel/{research_id}")
+async def cancel_research(research_id: str):
+    """Request cancellation of an active research task."""
+    try:
+        if research_id not in research_results:
+            raise HTTPException(status_code=404, detail="Research not found")
+        # Mark as cancelled; workers will observe and stop soon
+        research_results[research_id]["cancelled"] = True
+        # If already completed/failed, reflect that
+        if research_results[research_id]["status"] in ("completed", "failed"):
+            return {"status": research_results[research_id]["status"]}
+        return {"status": "cancelling"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling research {research_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to cancel research")
+
+@app.get("/research-stream/{research_id}")
+async def research_stream(research_id: str, request: Request):
+    """Server-Sent Events stream for a research task."""
+    if research_id not in research_results:
+        raise HTTPException(status_code=404, detail="Research not found")
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    research_streams.setdefault(research_id, set()).add(q)
+
+    async def event_generator():
+        try:
+            # Send initial state
+            state = research_results.get(research_id, {})
+            initial = {
+                "event": "state",
+                "data": {
+                    "status": state.get("status"),
+                    "phase": state.get("phase"),
+                    "progress": state.get("progress", {}),
+                    "events": state.get("events", []),
+                    "entity_name": state.get("entity_name"),
+                    "started_at": state.get("started_at"),
+                    "live_results": state.get("live_results"),
+                }
+            }
+            yield f"event: {initial['event']}\n" + f"data: {json.dumps(initial['data'])}\n\n"
+
+            while True:
+                # client disconnected
+                if await request.is_disconnected():
+                    break
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    # keep-alive comment to prevent proxies from closing
+                    yield ": keep-alive\n\n"
+                    continue
+                try:
+                    evt = msg.get("event", "message")
+                    data = msg.get("data", {})
+                    yield f"event: {evt}\n" + f"data: {json.dumps(data)}\n\n"
+                except Exception:
+                    continue
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # Cleanup subscriber
+            try:
+                research_streams.get(research_id, set()).discard(q)
+                if not research_streams.get(research_id):
+                    research_streams.pop(research_id, None)
+            except Exception:
+                pass
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"  # for nginx
+    })
 
 # Install Playwright browsers on startup
 @app.on_event("startup")
