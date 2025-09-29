@@ -244,7 +244,8 @@ class EntityResearchService:
                                         content=page.content,
                                         entity_name=entity_name,
                                         entity_type=entity_type,
-                                        keywords=keywords
+                                        keywords=keywords,
+                                        source_url=page.url
                                     ),
                                     timeout=45  # Reduced to improve responsiveness on cancel
                                 )
@@ -252,6 +253,21 @@ class EntityResearchService:
                             self.logger.info(
                                 f"LLM extract done | url={page.url} | keys={list((llm_result or {}).keys())}"
                             )
+                            
+                            # Discard low keyword-aligned profiles when keywords are provided
+                            try:
+                                alignment_score = float((llm_result or {}).get("keyword_alignment_score", 0.0) or 0.0)
+                            except Exception:
+                                alignment_score = 0.0
+                            if (keywords and len(keywords) > 0) and alignment_score <= 0.3:
+                                if progress_callback:
+                                    progress_callback(phase="analyzing", payload={
+                                        "message": f"Discarded low-alignment page (score={alignment_score:.2f}): {page.title}",
+                                        "pages_analyzed": len(profiles),
+                                        "pages_total": total_urls,
+                                        "current_page": page.title
+                                    })
+                                return
                             
                             profile = {
                                 **llm_result,
@@ -1032,30 +1048,6 @@ class EntityResearchService:
         
         # Crawl the pages
         return await self.crawler.crawl(urls)
-    
-    async def _process_with_llm(self, entity_name: str, crawled_pages: List[CrawledPage]) -> Dict[str, Any]:
-        """Process crawled pages with the LLM to extract entity information."""
-        if not crawled_pages:
-            return {}
-        
-        # Filter out error pages
-        valid_pages = [page for page in crawled_pages if page.status_code == 200 and not page.error]
-        
-        if not valid_pages:
-            return {}
-        
-        # Convert to search result format expected by the LLM client
-        search_results = [
-            {
-                'title': page.title,
-                'url': page.url,
-                'snippet': page.content[:500]  # Use first 500 chars as snippet
-            }
-            for page in valid_pages
-        ]
-        
-        # Process with LLM
-        return await self.llm_client.process_search_results(entity_name, search_results)
 
     def _local_consolidate(self, entity_name: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> List[Dict[str, Any]]:
         """Deterministic, fast consolidation when LLM combine is disabled/unavailable.

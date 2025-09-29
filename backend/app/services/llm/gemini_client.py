@@ -344,6 +344,15 @@ class GeminiClient:
         - If location/profession in keywords doesn't match extracted data, lower confidence
         - Prioritize information that aligns with user's search intent
         
+        KEYWORD ALIGNMENT SCORING (return keyword_alignment_score in 0-1):
+        - If no keywords are provided, set keyword_alignment_score = 0.0
+        - Otherwise compute using these components:
+          a) Coverage (0 to 0.4): fraction of provided keywords (or close synonyms) that appear in the text AND are relevant to this entity
+          b) Consistency (0 to 0.3): how well extracted facts (profession, location, organizations, dates) align with the keyword intent
+          c) Proximity (0 to 0.2): keywords occur near the detected entity name or core facts about this entity
+          d) Penalties (up to -0.3): clear mismatches/contradictions (e.g., wrong profession/location) should reduce the score
+        - Guidance: ≥0.80 strong, 0.60–0.79 moderate, 0.30–0.59 weak, <0.30 unrelated
+        
         ENHANCED FIELD EXTRACTION:
         - Extract article publication date when available
         - Note time context for all age-related information
@@ -656,62 +665,6 @@ class GeminiClient:
                 "confidence": 0.0,
                 "chunks_processed": 0,
                 "error": f"Failed to process research: {str(e)}"
-            }
-
-    async def process_search_results(self, entity_name: str, search_results: List[Dict]) -> Dict[str, Any]:
-        """
-        Process search results to extract entity information.
-        
-        Args:
-            entity_name: Name of the entity to search for
-            search_results: List of search results from search engines
-            
-        Returns:
-            Dictionary containing consolidated entity information
-        """
-        if not search_results:
-            return {
-                "entity_name": entity_name,
-                "extracted_info": {},
-                "field_sources": {},
-                "sources": [],
-                "error": "No search results provided"
-            }
-        
-        try:
-            # Extract content from search results
-            contents = [
-                f"Title: {result.get('title', '')}\nSnippet: {result.get('snippet', '')}"
-                for result in search_results
-                if result.get('title') or result.get('snippet')
-            ]
-            
-            if not contents:
-                return {
-                    "entity_name": entity_name,
-                    "extracted_info": {},
-                    "field_sources": {},
-                    "sources": [],
-                    "error": "No valid content found in search results"
-                }
-            
-            # Combine all content into a single text
-            combined_content = "\n\n---\n\n".join(contents)
-            
-            # Extract information using the LLM
-            return await self.extract_entity_info(
-                content=combined_content,
-                entity_name=entity_name
-            )
-            
-        except Exception as e:
-            logger.error(f"Error in process_search_results: {str(e)}")
-            return {
-                "entity_name": entity_name,
-                "profiles": [],
-                "field_sources": {},
-                "sources": [],
-                "error": f"Failed to process search results: {str(e)}"
             }
 
     async def consolidate_clusters(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
