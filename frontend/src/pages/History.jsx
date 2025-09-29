@@ -330,7 +330,14 @@ const History = () => {
                             </div>
                           </div>
                           <div className="ml-4">
-                            <div className="text-sm font-medium text-gray-900">{search.entity_name}</div>
+                            <div className="text-sm font-medium text-gray-900 flex items-center space-x-2">
+                              <span>{search.entity_name}</span>
+                              {search.search_mode && (
+                                <span className={`inline-flex px-2 py-0.5 text-xs font-medium rounded-full ${search.search_mode === 'paragraph' ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700'}`}>
+                                  {search.search_mode === 'paragraph' ? 'Paragraph Search' : 'Manual Search'}
+                                </span>
+                              )}
+                            </div>
                             {search.keywords && search.keywords.length > 0 && (
                               <div className="text-sm text-gray-500">
                                 Keywords: {search.keywords.join(', ')}

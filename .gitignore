@@ -28,3 +28,4 @@ venv
 # General ignores
 .env
 .env.example
+scripts

@@ -134,13 +134,18 @@ async def research_entity(
         except Exception as e:
             logger.warning(f"Paragraph-based query generation failed, falling back: {e}")
 
+        # Determine search mode for history/UI
+        was_paragraph = bool(request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip())
+        search_mode = 'paragraph' if was_paragraph else 'manual'
+
         # Save search start to history
         history_db.save_search_start(
             research_id=research_id,
             entity_name=request.entity_name,
             entity_type=request.entity_type,
             search_queries=final_search_queries,
-            keywords=final_keywords or request.keywords
+            keywords=final_keywords or request.keywords,
+            search_mode=search_mode
         )
         
         # Perform the research synchronously
@@ -148,8 +153,7 @@ async def research_entity(
             entity_name=request.entity_name,
             entity_type=request.entity_type,
             search_queries=final_search_queries or None,
-            keywords=final_keywords or request.keywords or None,
-            context_paragraph=None
+            keywords=final_keywords or request.keywords or None
         )
         
         if not results:
@@ -168,7 +172,8 @@ async def research_entity(
             "entity_name": request.entity_name,
             "results": results,
             "research_id": research_id,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "search_mode": search_mode,
         }
         
     except Exception as e:
@@ -219,6 +224,10 @@ async def research_entity_async(
     """Start research asynchronously and stream progress via /research-status."""
     try:
         research_id = str(uuid.uuid4())
+        # Determine search mode
+        was_paragraph = bool(request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip())
+        search_mode = 'paragraph' if was_paragraph else 'manual'
+
         research_results[research_id] = {
             "status": "pending",
             "phase": "starting",
@@ -228,7 +237,8 @@ async def research_entity_async(
             "results": None,
             "live_results": None,
             "events": [],
-            "cancelled": False
+            "cancelled": False,
+            "search_mode": search_mode,
         }
         
         # If a paragraph is provided, generate queries from it using LLM
@@ -272,7 +282,6 @@ async def research_entity_async(
             research_service,
             final_keywords or request.keywords or None,
             final_search_queries or None,
-            None,
             history_db
         )
         # Initial SSE state push (if listeners present)
@@ -284,6 +293,7 @@ async def research_entity_async(
             "entity_name": request.entity_name,
             "started_at": research_results[research_id]["started_at"],
             "live_results": None,
+            "search_mode": search_mode,
         })
 
         return {"research_id": research_id, "status": "started"}
@@ -319,6 +329,7 @@ async def get_research_status(
             "results": result.get("results"),
             "live_results": result.get("live_results"),
             "cancelled": result.get("cancelled", False),
+            "search_mode": result.get("search_mode", "manual"),
             "error": result.get("error")
         }
     
@@ -339,6 +350,7 @@ async def get_research_status(
             "started_at": db_search["started_at"],
             "completed_at": db_search.get("completed_at"),
             "results": db_search.get("full_results"),  # Now retrieve full results from DB
+            "search_mode": db_search.get("search_mode", "manual"),
             "error": db_search.get("error_message")
         }
     except Exception as e:
@@ -352,7 +364,6 @@ async def perform_research(
     research_service: EntityResearchService,
     keywords: Optional[List[str]] = None,
     search_queries: Optional[List[str]] = None,
-    context_paragraph: Optional[str] = None,
     history_db: Optional[HistoryDatabase] = None
 ):
     """Perform the actual research in the background."""
@@ -447,7 +458,6 @@ async def perform_research(
                 entity_type=entity_type,
                 search_queries=search_queries,
                 keywords=keywords,
-                context_paragraph=context_paragraph,
                 progress_callback=progress_callback,
                 should_cancel=lambda: bool(research_results.get(research_id, {}).get("cancelled", False))
             )

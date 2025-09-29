@@ -40,7 +40,7 @@ class EntityResearchService:
             self.llm_semaphore = asyncio.Semaphore(8)
         self.logger = logging.getLogger(__name__)
     
-    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, context_paragraph: Optional[str] = None, progress_callback: Optional[Any] = None, should_cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None, should_cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         Research an entity by searching the web and analyzing the results.
         
@@ -244,8 +244,7 @@ class EntityResearchService:
                                         content=page.content,
                                         entity_name=entity_name,
                                         entity_type=entity_type,
-                                        keywords=keywords,
-                                        context_paragraph=context_paragraph
+                                        keywords=keywords
                                     ),
                                     timeout=45  # Reduced to improve responsiveness on cancel
                                 )
@@ -271,17 +270,10 @@ class EntityResearchService:
                                     "current_page": page.title
                                 })
                             
-                            # Bucketize with paragraph alignment gating (when provided)
+                            # Bucketize profiles
                             detected = (llm_result.get("detected_entity_name") or "").strip()
                             same_as = bool(llm_result.get("same_as_input"))
-                            para_align = llm_result.get("paragraph_alignment_score")
-                            # Require moderate alignment when context is present and LLM provided a score
                             alignment_ok = True
-                            if context_paragraph and para_align is not None:
-                                try:
-                                    alignment_ok = float(para_align) >= float(os.getenv("PARAGRAPH_ALIGN_THRESHOLD", "0.6"))
-                                except Exception:
-                                    alignment_ok = para_align >= 0.6
                             if same_as:
                                 if alignment_ok:
                                     clusters.setdefault("query_name", []).append(profile)
@@ -342,7 +334,7 @@ class EntityResearchService:
                                     # Start consolidation for this chunk
                                     chunk_profiles = profiles[-consolidation_chunk_size:].copy()
                                     consolidation_task = asyncio.create_task(
-                                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks), context_paragraph=context_paragraph)
+                                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
                                     )
                                     consolidation_tasks.append(consolidation_task)
                                     self.logger.info(f"Started consolidation task {len(consolidation_tasks)} for profiles {len(profiles)-consolidation_chunk_size+1}-{len(profiles)}")
@@ -410,7 +402,7 @@ class EntityResearchService:
                 if remaining_profiles > 0:
                     chunk_profiles = profiles[-remaining_profiles:].copy()
                     consolidation_task = asyncio.create_task(
-                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks), context_paragraph=context_paragraph)
+                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
                     )
                     consolidation_tasks.append(consolidation_task)
                     self.logger.info(f"Started final consolidation task for remaining {remaining_profiles} profiles")
@@ -471,7 +463,7 @@ class EntityResearchService:
                     })
                 
                 try:
-                    final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles, context_paragraph=context_paragraph)
+                    final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
                     self.logger.info("Streaming consolidation with final pass completed")
                 except Exception as e:
                     self.logger.warning(f"Final consolidation failed: {e}, using streaming results as-is")
@@ -496,7 +488,7 @@ class EntityResearchService:
                             final_entities = await self._chunked_consolidation(entity_name, entity_type, profiles, source_url_to_id)
                         else:
                             # Direct consolidation for smaller sets
-                            final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles, context_paragraph=context_paragraph)
+                            final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
                         
                         self.logger.info("Final consolidation completed (LLM)")
                         if not final_entities or not final_entities.get("entities"):
@@ -1183,7 +1175,11 @@ class EntityResearchService:
         """Consolidate a single chunk of profiles asynchronously."""
         try:
             self.logger.info(f"Starting consolidation for chunk {chunk_id} with {len(chunk_profiles)} profiles")
-            result = await self.llm_client.consolidate_clusters(entity_name, entity_type, chunk_profiles)
+            result = await self.llm_client.consolidate_clusters(
+                entity_name,
+                entity_type,
+                chunk_profiles,
+            )
             self.logger.info(f"Chunk {chunk_id} consolidation completed")
             return result
         except Exception as e:
@@ -1192,48 +1188,57 @@ class EntityResearchService:
             local_entities = self._local_consolidate(entity_name, chunk_profiles, {})
             return {"entities": local_entities}
 
-    async def _chunked_consolidation(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> Dict[str, Any]:
+    async def _chunked_consolidation(
+        self,
+        entity_name: str,
+        entity_type: str,
+        profiles: List[Dict[str, Any]],
+        source_url_to_id: Dict[str, int],
+    ) -> Dict[str, Any]:
         """Consolidate large profile sets using chunking strategy."""
         chunk_size = 15  # Process 15 profiles at a time
         chunks = [profiles[i:i + chunk_size] for i in range(0, len(profiles), chunk_size)]
-        
+
         self.logger.info(f"Using chunked consolidation: {len(profiles)} profiles in {len(chunks)} chunks")
-        
-        consolidated_entities = []
-        
-        # Process each chunk
-        for i, chunk in enumerate(chunks):
-            self.logger.info(f"Processing chunk {i+1}/{len(chunks)} with {len(chunk)} profiles")
+
+        consolidated_entities: List[Dict[str, Any]] = []
+
+        # Process each chunk sequentially
+        for idx, chunk in enumerate(chunks):
             try:
-                chunk_result = await self.llm_client.consolidate_clusters(entity_name, entity_type, chunk)
-                if chunk_result and chunk_result.get("entities"):
-                    consolidated_entities.extend(chunk_result["entities"])
+                res = await self._consolidate_chunk_async(
+                    entity_name,
+                    entity_type,
+                    chunk,
+                    idx,
+                )
+                if res and isinstance(res, dict) and res.get("entities"):
+                    consolidated_entities.extend(res["entities"])
             except Exception as e:
-                self.logger.warning(f"Chunk {i+1} consolidation failed: {e}, using local fallback")
-                # Fallback to local consolidation for this chunk
-                local_entities = self._local_consolidate(entity_name, chunk, source_url_to_id)
-                consolidated_entities.extend(local_entities)
-        
-        # If we have multiple chunks, do a final consolidation pass on the results
-        if len(chunks) > 1 and consolidated_entities:
-            self.logger.info(f"Final consolidation pass on {len(consolidated_entities)} intermediate entities")
-            try:
-                # Convert consolidated entities back to profile format for final pass
+                self.logger.warning(f"Chunk {idx} consolidation error: {e}")
+
+        # Final consolidation pass on already consolidated entities
+        try:
+            if consolidated_entities:
                 final_profiles = []
-                for idx, entity in enumerate(consolidated_entities):
+                for i, entity in enumerate(consolidated_entities):
                     final_profiles.append({
                         "detected_entity_name": entity.get("canonical_name"),
                         "same_as_input": entity.get("same_as_query", False),
-                        "confidence": 0.8,  # High confidence for already consolidated entities
-                        "extracted_info": entity.get("combined_fields", {}),
-                        "source_url": f"consolidated_chunk_{idx}"
+                        "confidence": float(entity.get("consolidation_confidence", 0.8) or 0.8),
+                        "extracted_info": entity.get("combined_fields", {}) or {},
+                        "source_url": f"consolidated_chunk_{i}",
                     })
-                
-                final_result = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
+
+                final_result = await self.llm_client.consolidate_clusters(
+                    entity_name,
+                    entity_type,
+                    final_profiles,
+                )
                 if final_result and final_result.get("entities"):
                     return final_result
-            except Exception as e:
-                self.logger.warning(f"Final consolidation pass failed: {e}")
-        
+        except Exception as e:
+            self.logger.warning(f"Final consolidation pass failed: {e}")
+
         # Return consolidated entities
         return {"entities": consolidated_entities}

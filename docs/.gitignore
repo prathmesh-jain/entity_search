@@ -1,0 +1,6 @@
+/.quarto/
+**/*.quarto_ipynb
+*.mmd
+diagrams
+*.qmd
+*.pptx

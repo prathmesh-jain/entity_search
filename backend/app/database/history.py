@@ -24,6 +24,7 @@ class HistoryDatabase:
                         entity_name TEXT NOT NULL,
                         search_queries TEXT,  -- JSON array of search queries
                         keywords TEXT,        -- JSON array of keywords
+                        search_mode TEXT,     -- 'paragraph' | 'manual'
                         status TEXT NOT NULL DEFAULT 'pending',
                         phase TEXT,
                         started_at TEXT NOT NULL,
@@ -52,6 +53,15 @@ class HistoryDatabase:
                     conn.execute("ALTER TABLE search_history ADD COLUMN entity_type TEXT")
                     logger.info("Added entity_type column to existing search_history table")
                 
+                if 'search_mode' not in columns:
+                    conn.execute("ALTER TABLE search_history ADD COLUMN search_mode TEXT")
+                    # Backfill existing rows as 'manual'
+                    try:
+                        conn.execute("UPDATE search_history SET search_mode='manual' WHERE search_mode IS NULL")
+                    except Exception:
+                        pass
+                    logger.info("Added search_mode column to existing search_history table")
+                
                 conn.execute("""
                     CREATE INDEX IF NOT EXISTS idx_entity_name ON search_history(entity_name);
                 """)
@@ -74,20 +84,22 @@ class HistoryDatabase:
     def save_search_start(self, research_id: str, entity_name: str, 
                          entity_type: str,
                          search_queries: Optional[List[str]] = None,
-                         keywords: Optional[List[str]] = None) -> bool:
+                         keywords: Optional[List[str]] = None,
+                         search_mode: Optional[str] = None) -> bool:
         """Save the start of a new search to history."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("""
                     INSERT OR REPLACE INTO search_history 
-                    (research_id, entity_name, entity_type, search_queries, keywords, status, started_at)
-                    VALUES (?, ?, ?, ?, ?, 'pending', ?)
+                    (research_id, entity_name, entity_type, search_queries, keywords, search_mode, status, started_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
                 """, (
                     research_id,
                     entity_name,
                     entity_type,
                     json.dumps(search_queries) if search_queries else None,
                     json.dumps(keywords) if keywords else None,
+                    (search_mode or 'manual'),
                     datetime.now(timezone.utc).isoformat()
                 ))
                 conn.commit()
@@ -141,14 +153,19 @@ class HistoryDatabase:
             with sqlite3.connect(self.db_path) as conn:
                 # Get the start time to calculate duration
                 cursor = conn.execute("""
-                    SELECT started_at FROM search_history WHERE research_id = ?
+                    SELECT started_at, search_mode FROM search_history WHERE research_id = ?
                 """, (research_id,))
                 row = cursor.fetchone()
                 
                 duration_seconds = None
+                search_mode = None
                 if row and row[0]:
                     start_time = datetime.fromisoformat(row[0].replace('Z', '+00:00'))
                     duration_seconds = int((datetime.now(timezone.utc) - start_time).total_seconds())
+                    try:
+                        search_mode = row[1]
+                    except Exception:
+                        search_mode = None
                 
                 conn.execute("""
                     UPDATE search_history 
@@ -160,7 +177,7 @@ class HistoryDatabase:
                     status,
                     datetime.now(timezone.utc).isoformat(),
                     duration_seconds,
-                    json.dumps(results_summary),
+                    json.dumps({**results_summary, "search_mode": (search_mode or 'manual')}),
                     json.dumps(results) if results else None,
                     total_sources,
                     crawled_pages,

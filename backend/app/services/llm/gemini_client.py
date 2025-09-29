@@ -280,7 +280,6 @@ class GeminiClient:
         entity_type: str,
         fields: Optional[List[str]] = None,
         keywords: Optional[List[str]] = None,
-        context_paragraph: Optional[str] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -316,7 +315,7 @@ class GeminiClient:
         TARGET {entity_type.upper()}: '{entity_name}'
         ENTITY TYPE: {entity_type}
         CURRENT DATE: {current_date}
-        CURRENT YEAR: {current_year}{keywords_context}{paragraph_context}
+        CURRENT YEAR: {current_year}{keywords_context}
         
         CRITICAL MATCHING CRITERIA:
         1. EXACT NAME MATCHING: The entity name must be EXACTLY '{entity_name}' or extremely close variations
@@ -378,7 +377,6 @@ class GeminiClient:
             "name_similarity_score": number (0-1),
             "confidence": number (0-1),
             "keyword_alignment_score": number (0-1),
-            "paragraph_alignment_score": number (0-1) | null,
             "extracted_info": {{
                 {', '.join([f'"{field}": "value or null"' for field in fields])}
             }},
@@ -435,7 +433,6 @@ class GeminiClient:
             confidence = float(result.get("confidence", 0.0) or 0.0)
             name_similarity = float(result.get("name_similarity_score", 0.0) or 0.0)
             keyword_alignment = float(result.get("keyword_alignment_score", 0.0) or 0.0)
-            paragraph_alignment = float(result.get("paragraph_alignment_score", 0.0) or 0.0) if result.get("paragraph_alignment_score") is not None else None
             extracted_info = result.get("extracted_info", {}) or {}
             article_date = result.get("article_publication_date")
             article_summary = result.get("article_summary")
@@ -516,7 +513,6 @@ class GeminiClient:
                 "same_as_input": same_as,
                 "name_similarity_score": name_similarity,
                 "keyword_alignment_score": keyword_alignment,
-                "paragraph_alignment_score": paragraph_alignment,
                 "extracted_info": extracted_info,
                 "field_sources": field_sources,  # Sources tied to specific fields
                 "article_publication_date": article_date,
@@ -718,7 +714,7 @@ class GeminiClient:
                 "error": f"Failed to process search results: {str(e)}"
             }
 
-    async def consolidate_clusters(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]], context_paragraph: Optional[str] = None) -> Dict[str, Any]:
+    async def consolidate_clusters(self, entity_name: str, entity_type: str, profiles: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Final LLM pass to combine/segregate profiles into canonical entities.
 
@@ -746,7 +742,6 @@ class GeminiClient:
                     "source_title": p.get("source_title"),
                     "article_summary": p.get("article_summary"),
                     "keyword_alignment_score": p.get("keyword_alignment_score"),
-                    "paragraph_alignment_score": p.get("paragraph_alignment_score"),
                     "extracted_info": p.get("extracted_info", {}) or {}
                 })
 
