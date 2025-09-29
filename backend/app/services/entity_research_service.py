@@ -40,7 +40,7 @@ class EntityResearchService:
             self.llm_semaphore = asyncio.Semaphore(8)
         self.logger = logging.getLogger(__name__)
     
-    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, progress_callback: Optional[Any] = None, should_cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    async def research_entity(self, entity_name: str, entity_type: str, search_queries: Optional[List[str]] = None, keywords: Optional[List[str]] = None, context_paragraph: Optional[str] = None, progress_callback: Optional[Any] = None, should_cancel: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
         """
         Research an entity by searching the web and analyzing the results.
         
@@ -197,6 +197,9 @@ class EntityResearchService:
                         return
                     # Crawl the page
                     page = await self.crawler._crawl_single(url)
+                    # Check cancel after crawl
+                    if (should_cancel and should_cancel()) or early_stop_event.is_set():
+                        return
                     
                     # Assign source ID based on URL index for consistent ordering
                     source_id = url_index + 1
@@ -233,14 +236,18 @@ class EntityResearchService:
                             self.logger.info(f"LLM extract start | url={page.url} | content_len={content_len}")
                             
                             async with self.llm_semaphore:
+                                # Short-circuit if cancelled right before heavy LLM call
+                                if (should_cancel and should_cancel()) or early_stop_event.is_set():
+                                    return
                                 llm_result = await asyncio.wait_for(
                                     self.llm_client.extract_entity_info(
                                         content=page.content,
                                         entity_name=entity_name,
                                         entity_type=entity_type,
-                                        keywords=keywords
+                                        keywords=keywords,
+                                        context_paragraph=context_paragraph
                                     ),
-                                    timeout=60  # Reduced from 100s to 60s
+                                    timeout=45  # Reduced to improve responsiveness on cancel
                                 )
                             
                             self.logger.info(
@@ -264,13 +271,27 @@ class EntityResearchService:
                                     "current_page": page.title
                                 })
                             
-                            # Bucketize
+                            # Bucketize with paragraph alignment gating (when provided)
                             detected = (llm_result.get("detected_entity_name") or "").strip()
                             same_as = bool(llm_result.get("same_as_input"))
+                            para_align = llm_result.get("paragraph_alignment_score")
+                            # Require moderate alignment when context is present and LLM provided a score
+                            alignment_ok = True
+                            if context_paragraph and para_align is not None:
+                                try:
+                                    alignment_ok = float(para_align) >= float(os.getenv("PARAGRAPH_ALIGN_THRESHOLD", "0.6"))
+                                except Exception:
+                                    alignment_ok = para_align >= 0.6
                             if same_as:
-                                clusters.setdefault("query_name", []).append(profile)
+                                if alignment_ok:
+                                    clusters.setdefault("query_name", []).append(profile)
+                                else:
+                                    clusters.setdefault("uncertain", []).append(profile)
                             elif detected:
-                                clusters.setdefault(detected, []).append(profile)
+                                if alignment_ok:
+                                    clusters.setdefault(detected, []).append(profile)
+                                else:
+                                    clusters.setdefault("uncertain", []).append(profile)
                             else:
                                 clusters.setdefault("uncertain", []).append(profile)
                                 
@@ -315,11 +336,13 @@ class EntityResearchService:
                             
                             # Check if we have enough profiles for streaming consolidation
                             async with consolidation_lock:
-                                if len(profiles) >= consolidation_chunk_size and len(profiles) % consolidation_chunk_size == 0:
+                                if ((should_cancel and should_cancel()) or early_stop_event.is_set()):
+                                    pass  # Do not start new consolidation when cancelling
+                                elif len(profiles) >= consolidation_chunk_size and len(profiles) % consolidation_chunk_size == 0:
                                     # Start consolidation for this chunk
                                     chunk_profiles = profiles[-consolidation_chunk_size:].copy()
                                     consolidation_task = asyncio.create_task(
-                                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
+                                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks), context_paragraph=context_paragraph)
                                     )
                                     consolidation_tasks.append(consolidation_task)
                                     self.logger.info(f"Started consolidation task {len(consolidation_tasks)} for profiles {len(profiles)-consolidation_chunk_size+1}-{len(profiles)}")
@@ -337,6 +360,25 @@ class EntityResearchService:
                 asyncio.create_task(process_single_url(url, i)) 
                 for i, url in enumerate(urls)
             ]
+            # Background watcher to cancel tasks as soon as cancellation is requested
+            cancel_watch_task = None
+            if should_cancel:
+                async def _cancel_watch():
+                    try:
+                        while not early_stop_event.is_set():
+                            try:
+                                if should_cancel():
+                                    early_stop_event.set()
+                                    for rest in tasks:
+                                        if not rest.done():
+                                            rest.cancel()
+                                    break
+                            except Exception:
+                                pass
+                            await asyncio.sleep(0.3)
+                    except asyncio.CancelledError:
+                        return
+                cancel_watch_task = asyncio.create_task(_cancel_watch())
             
             # Process tasks as they complete; cancel remaining on early stop/cancel
             try:
@@ -353,18 +395,42 @@ class EntityResearchService:
                         break
             finally:
                 await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    if cancel_watch_task:
+                        cancel_watch_task.cancel()
+                except Exception:
+                    pass
             
-            # Handle remaining profiles that didn't reach chunk size
+            # Handle remaining profiles that didn't reach chunk size (unless cancelled)
             async with consolidation_lock:
-                remaining_profiles = len(profiles) % consolidation_chunk_size
+                if (should_cancel and should_cancel()) or early_stop_event.is_set():
+                    remaining_profiles = 0
+                else:
+                    remaining_profiles = len(profiles) % consolidation_chunk_size
                 if remaining_profiles > 0:
                     chunk_profiles = profiles[-remaining_profiles:].copy()
                     consolidation_task = asyncio.create_task(
-                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks))
+                        self._consolidate_chunk_async(entity_name, entity_type, chunk_profiles, len(consolidation_tasks), context_paragraph=context_paragraph)
                     )
                     consolidation_tasks.append(consolidation_task)
                     self.logger.info(f"Started final consolidation task for remaining {remaining_profiles} profiles")
             
+            # If cancellation happened, return early with a snapshot of current progress
+            if (should_cancel and should_cancel()):
+                self.logger.info("Cancellation requested - returning early with best-effort snapshot")
+                snapshot = _build_result_snapshot()
+                return {
+                    'entity_name': entity_name,
+                    'search_queries': search_queries,
+                    'search_results_count': len(search_results),
+                    'crawled_pages_count': completed_count,
+                    'clusters': snapshot.get('clusters', {}),
+                    'profiles': snapshot.get('profiles', []),
+                    'final_entities': snapshot.get('final_entities', {'entities': []}),
+                    'per_field_sources': snapshot.get('per_field_sources', {}),
+                    'sources': snapshot.get('sources', [])
+                }
+
             # Wait for all consolidation tasks to complete
             if consolidation_tasks:
                 self.logger.info(f"Waiting for {len(consolidation_tasks)} consolidation tasks to complete...")
@@ -405,7 +471,7 @@ class EntityResearchService:
                     })
                 
                 try:
-                    final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
+                    final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles, context_paragraph=context_paragraph)
                     self.logger.info("Streaming consolidation with final pass completed")
                 except Exception as e:
                     self.logger.warning(f"Final consolidation failed: {e}, using streaming results as-is")
@@ -430,7 +496,7 @@ class EntityResearchService:
                             final_entities = await self._chunked_consolidation(entity_name, entity_type, profiles, source_url_to_id)
                         else:
                             # Direct consolidation for smaller sets
-                            final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
+                            final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles, context_paragraph=context_paragraph)
                         
                         self.logger.info("Final consolidation completed (LLM)")
                         if not final_entities or not final_entities.get("entities"):

@@ -111,15 +111,26 @@ async def research_entity(
         logger.info(f"Starting synchronous research for entity: {request.entity_name}")
         
         # If a paragraph is provided, generate queries from it using LLM
+        # Use these as ACTUAL search_queries, and also reuse them as keywords context for LLM
         final_search_queries = request.search_queries or None
+        final_keywords = list(request.keywords or [])
         try:
             if request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip():
-                final_search_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
+                paragraph_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
                     request.entity_name,
                     request.entity_type,
                     request.paragraph,
                     num_queries=4
                 )
+                # Use paragraph queries for actual search
+                final_search_queries = paragraph_queries or request.search_queries or None
+                # Also pass them as keywords context (dedupe while preserving order)
+                seen = set(k.strip().lower() for k in final_keywords)
+                for q in (paragraph_queries or []):
+                    qq = (q or '').strip()
+                    if qq and qq.lower() not in seen:
+                        final_keywords.append(qq)
+                        seen.add(qq.lower())
         except Exception as e:
             logger.warning(f"Paragraph-based query generation failed, falling back: {e}")
 
@@ -129,7 +140,7 @@ async def research_entity(
             entity_name=request.entity_name,
             entity_type=request.entity_type,
             search_queries=final_search_queries,
-            keywords=request.keywords
+            keywords=final_keywords or request.keywords
         )
         
         # Perform the research synchronously
@@ -137,7 +148,8 @@ async def research_entity(
             entity_name=request.entity_name,
             entity_type=request.entity_type,
             search_queries=final_search_queries or None,
-            keywords=request.keywords or None
+            keywords=final_keywords or request.keywords or None,
+            context_paragraph=None
         )
         
         if not results:
@@ -220,15 +232,26 @@ async def research_entity_async(
         }
         
         # If a paragraph is provided, generate queries from it using LLM
+        # Use these as ACTUAL search_queries, and also reuse them as keywords context for LLM
         final_search_queries = request.search_queries or None
+        final_keywords = list(request.keywords or [])
         try:
             if request.paragraph and isinstance(request.paragraph, str) and request.paragraph.strip():
-                final_search_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
+                paragraph_queries = await research_service.llm_client.generate_search_queries_from_paragraph(
                     request.entity_name,
                     request.entity_type,
                     request.paragraph,
                     num_queries=4
                 )
+                # Use paragraph queries for actual search
+                final_search_queries = paragraph_queries or request.search_queries or None
+                # Also pass them as keywords context (dedupe)
+                seen = set(k.strip().lower() for k in final_keywords)
+                for q in (paragraph_queries or []):
+                    qq = (q or '').strip()
+                    if qq and qq.lower() not in seen:
+                        final_keywords.append(qq)
+                        seen.add(qq.lower())
         except Exception as e:
             logger.warning(f"Paragraph-based query generation failed, falling back: {e}")
 
@@ -238,7 +261,7 @@ async def research_entity_async(
             entity_name=request.entity_name,
             entity_type=request.entity_type,
             search_queries=final_search_queries,
-            keywords=request.keywords
+            keywords=final_keywords or request.keywords
         )
         
         background_tasks.add_task(
@@ -247,8 +270,9 @@ async def research_entity_async(
             request.entity_name,
             request.entity_type,
             research_service,
-            request.keywords or None,
+            final_keywords or request.keywords or None,
             final_search_queries or None,
+            None,
             history_db
         )
         # Initial SSE state push (if listeners present)
@@ -328,6 +352,7 @@ async def perform_research(
     research_service: EntityResearchService,
     keywords: Optional[List[str]] = None,
     search_queries: Optional[List[str]] = None,
+    context_paragraph: Optional[str] = None,
     history_db: Optional[HistoryDatabase] = None
 ):
     """Perform the actual research in the background."""
@@ -422,6 +447,7 @@ async def perform_research(
                 entity_type=entity_type,
                 search_queries=search_queries,
                 keywords=keywords,
+                context_paragraph=context_paragraph,
                 progress_callback=progress_callback,
                 should_cancel=lambda: bool(research_results.get(research_id, {}).get("cancelled", False))
             )
@@ -451,9 +477,12 @@ async def perform_research(
         except Exception:
             pass
         
-        # Save completion to history
+        # Save completion to history (ensure results is a dict)
         if history_db:
-            history_db.save_search_completion(research_id, research_results[research_id].get("results"), "cancelled" if is_cancelled else "completed")
+            _res = research_results[research_id].get("results")
+            if not isinstance(_res, dict):
+                _res = {}
+            history_db.save_search_completion(research_id, _res, "cancelled" if is_cancelled else "completed")
         
     except Exception as e:
         logger.error(f"Error in research task {research_id}: {str(e)}", exc_info=True)
