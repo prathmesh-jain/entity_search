@@ -830,6 +830,8 @@ class EntityResearchService:
                             member_indexes = sorted(list(set(inferred_idxs)))
                             ent['member_profile_indexes'] = member_indexes
                         ranked_field_sources: Dict[str, List[int]] = {}
+                        # aggregate per-entity source scores across all fields
+                        agg_source_scores: Dict[int, float] = {}
                         for field_name, field_value in combined_fields.items():
                             # Collect candidate source IDs with scores
                             candidate_scores: Dict[int, float] = {}
@@ -910,31 +912,60 @@ class EntityResearchService:
                                 # Keep max score per source id
                                 candidate_scores[sid] = max(candidate_scores.get(sid, 0.0), score)
                             if candidate_scores:
+                                # accumulate per-entity aggregate source scores (sum across fields)
+                                for _sid, _sc in candidate_scores.items():
+                                    agg_source_scores[_sid] = agg_source_scores.get(_sid, 0.0) + _sc
                                 ordered = sorted(candidate_scores.items(), key=lambda kv: (-kv[1], kv[0]))
                                 ranked_field_sources[field_name] = [sid for sid, _ in ordered]
                         # Replace or set entity field_sources with ranked list
                         if ranked_field_sources:
                             ent['field_sources'] = ranked_field_sources
-                    # Optional: enforce uniqueness of sources across entities (disabled by default)
+                        # store aggregate scores for later cross-entity assignment
+                        ent['_agg_source_scores'] = agg_source_scores
+                    # Enforce uniqueness of sources across entities using best-match assignment (enabled by default)
                     try:
-                        if os.getenv("DEDUP_SOURCES_ACROSS_ENTITIES", "false").lower() == "true":
-                            assigned: set = set()
-                            ordered_ents = sorted(final_entities['entities'], key=lambda e: (
-                                not bool(e.get('same_as_query')), -float(e.get('name_similarity_to_query') or 0.0)
-                            ))
-                            for ent in ordered_ents:
+                        if os.getenv("DEDUP_SOURCES_ACROSS_ENTITIES", "true").lower() == "true":
+                            # Build global assignment: each source ID -> best entity based on aggregate score
+                            def ent_quality(ent: Dict[str, Any]) -> tuple:
+                                fields = ent.get('combined_fields') or {}
+                                non_empty = sum(1 for v in (fields.values() if isinstance(fields, dict) else []) if v not in (None, "", [], {}))
+                                return (not bool(ent.get('same_as_query')), -float(ent.get('name_similarity_to_query') or 0.0), -non_empty)
+
+                            best_for_source: Dict[int, tuple] = {}
+                            # (entity_idx, score, tie_quality)
+                            for e_idx, ent in enumerate(final_entities['entities']):
+                                agg = ent.get('_agg_source_scores') or {}
+                                tq = ent_quality(ent)
+                                for sid, sc in agg.items():
+                                    prev = best_for_source.get(sid)
+                                    if not prev:
+                                        best_for_source[sid] = (e_idx, float(sc), tq)
+                                    else:
+                                        p_idx, p_sc, p_tq = prev
+                                        # choose by higher score, then better tie quality
+                                        if (sc > p_sc) or (abs(sc - p_sc) < 1e-6 and tq < p_tq):
+                                            best_for_source[sid] = (e_idx, float(sc), tq)
+
+                            # Now filter each entity's field_sources to keep only assigned sources
+                            for e_idx, ent in enumerate(final_entities['entities']):
                                 fs = ent.get('field_sources') or {}
                                 new_fs: Dict[str, List[int]] = {}
+                                assigned_list: set = set()
                                 for fname, sids in fs.items():
-                                    filtered = [sid for sid in (sids or []) if sid not in assigned]
+                                    filtered = [sid for sid in (sids or []) if best_for_source.get(sid, (None,))[0] == e_idx]
                                     if filtered:
                                         new_fs[fname] = filtered
-                                used_here = set()
-                                for arr in new_fs.values():
-                                    used_here.update(arr)
-                                assigned.update(used_here)
+                                        assigned_list.update(filtered)
                                 if new_fs:
                                     ent['field_sources'] = new_fs
+                                # also expose entity-level unique sources list (sorted by aggregate score desc)
+                                agg = ent.get('_agg_source_scores') or {}
+                                ent['entity_sources'] = sorted([sid for sid in assigned_list], key=lambda s: -float(agg.get(s, 0.0)))
+                                # cleanup temp
+                                try:
+                                    del ent['_agg_source_scores']
+                                except Exception:
+                                    pass
                     except Exception:
                         pass
             except Exception as e:
