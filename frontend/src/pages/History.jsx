@@ -368,11 +368,11 @@ const History = () => {
                         </div>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium space-x-3">
-                        {search.status === 'completed' && (
+                        {(search.status === 'completed' || search.status === 'cancelled') && (
                           <button
                             onClick={() => navigate(`/results?research_id=${search.research_id}`)}
                             className="text-blue-600 hover:text-blue-900"
-                            title="View Results"
+                            title={search.status === 'cancelled' ? 'View Partial Results' : 'View Results'}
                           >
                             <svg
                               xmlns="http://www.w3.org/2000/svg"

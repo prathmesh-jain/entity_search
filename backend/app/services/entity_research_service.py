@@ -688,9 +688,102 @@ class EntityResearchService:
             # Build ranked field_sources per entity using member profiles
             try:
                 if isinstance(final_entities, dict) and isinstance(final_entities.get('entities'), list):
+                    # De-duplicate near-identical entities by name and cap count
+                    try:
+                        def _n(s: Optional[str]) -> str:
+                            return (s or '').strip().lower()
+
+                        def _dedup_entities_by_name(entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                            th = float(os.getenv("DEDUP_NAME_THRESHOLD", "0.92"))
+                            clusters: List[List[Dict[str, Any]]] = []
+                            for e in entities:
+                                name = _n(e.get('canonical_name'))
+                                placed = False
+                                for c in clusters:
+                                    base = _n(c[0].get('canonical_name'))
+                                    if name and base and SequenceMatcher(None, name, base).ratio() >= th:
+                                        c.append(e)
+                                        placed = True
+                                        break
+                                if not placed:
+                                    clusters.append([e])
+
+                            merged: List[Dict[str, Any]] = []
+                            for c in clusters:
+                                if len(c) == 1:
+                                    merged.append(c[0])
+                                    continue
+                                # choose primary with better similarity/coverage
+                                def quality(ent: Dict[str, Any]):
+                                    fields = ent.get('combined_fields') or {}
+                                    non_empty = sum(1 for v in (fields.values() if isinstance(fields, dict) else []) if v not in (None, "", [], {}))
+                                    return (
+                                        not bool(ent.get('same_as_query')),
+                                        -float(ent.get('name_similarity_to_query') or 0.0),
+                                        -non_empty,
+                                    )
+                                primary = sorted(c, key=quality)[0]
+                                # merge member indexes and sources
+                                mi: List[int] = []
+                                srcs: List[str] = []
+                                for ent in c:
+                                    mi.extend(ent.get('member_profile_indexes') or [])
+                                    srcs.extend(ent.get('sources') or [])
+                                merged.append({
+                                    **primary,
+                                    'member_profile_indexes': sorted(list(set([i for i in mi if isinstance(i, int) and i >= 0]))),
+                                    'sources': sorted(list(set([s for s in srcs if s]))),
+                                    'same_as_query': bool(primary.get('same_as_query')) or any(bool(e.get('same_as_query')) for e in c),
+                                    'name_similarity_to_query': max(float(primary.get('name_similarity_to_query') or 0.0), max(float(e.get('name_similarity_to_query') or 0.0) for e in c)),
+                                    'consolidation_confidence': max(float(primary.get('consolidation_confidence') or 0.0), max(float(e.get('consolidation_confidence') or 0.0) for e in c)),
+                                })
+                            # Cap entities
+                            cap = int(os.getenv("MAX_FINAL_ENTITIES", "3"))
+                            if len(merged) > cap:
+                                def rank_ent(ent: Dict[str, Any]):
+                                    fields = ent.get('combined_fields') or {}
+                                    non_empty = sum(1 for v in (fields.values() if isinstance(fields, dict) else []) if v not in (None, "", [], {}))
+                                    return (
+                                        not bool(ent.get('same_as_query')),
+                                        -float(ent.get('name_similarity_to_query') or 0.0),
+                                        -non_empty,
+                                    )
+                                merged = sorted(merged, key=rank_ent)[:cap]
+                            return merged
+
+                        final_entities['entities'] = _dedup_entities_by_name(final_entities['entities'])
+                    except Exception as de:
+                        self.logger.debug(f"entity de-dup skipped due to error: {de}")
+
                     # Helper to normalize names
                     def _norm(s: Optional[str]) -> str:
                         return (s or '').strip().lower()
+
+                    # Normalize values to list of comparable lowercase strings
+                    def _norm_values(x: Any) -> List[str]:
+                        vals: List[str] = []
+                        try:
+                            if isinstance(x, (list, tuple, set)):
+                                for it in x:
+                                    vals.extend(_norm_values(it))
+                            elif isinstance(x, dict):
+                                try:
+                                    import json as _json
+                                    vals.append(_norm(_json.dumps(x, sort_keys=True, ensure_ascii=False)))
+                                except Exception:
+                                    vals.append(_norm(str(x)))
+                            else:
+                                vals.append(_norm(str(x)))
+                        except Exception:
+                            vals.append(_norm(str(x)))
+                        # dedupe while preserving order
+                        seen = set()
+                        out = []
+                        for v in vals:
+                            if v not in seen:
+                                out.append(v)
+                                seen.add(v)
+                        return out
 
                     # Build mapping: source_url -> profile index
                     src_to_idx: Dict[str, int] = {}
@@ -717,15 +810,30 @@ class EntityResearchService:
                                     pname = _norm((prof or {}).get('detected_entity_name'))
                                     if ent_name_norm and pname:
                                         sim = SequenceMatcher(None, ent_name_norm, pname).ratio()
-                                        if sim >= name_match_threshold:
+                                        use_member_threshold = max(0.8, name_match_threshold - 0.05)
+                                        if sim >= use_member_threshold:
                                             inferred_idxs.append(i)
+                            # Field-based fallback if no members by name similarity
+                            if not inferred_idxs:
+                                try:
+                                    for i, prof in enumerate(profiles):
+                                        ex = (prof or {}).get('extracted_info') or {}
+                                        for f, v in (combined_fields.items() if isinstance(combined_fields, dict) else []):
+                                            if f in ex and ex[f] not in (None, "", [], {}):
+                                                evs = _norm_values(v)
+                                                pvs = _norm_values(ex[f])
+                                                if any((ev == pv or ev in pv or pv in ev) for ev in evs for pv in pvs if ev and pv):
+                                                    inferred_idxs.append(i)
+                                                    break
+                                except Exception:
+                                    pass
                             member_indexes = sorted(list(set(inferred_idxs)))
                             ent['member_profile_indexes'] = member_indexes
                         ranked_field_sources: Dict[str, List[int]] = {}
                         for field_name, field_value in combined_fields.items():
                             # Collect candidate source IDs with scores
                             candidate_scores: Dict[int, float] = {}
-                            value_norm = str(field_value).strip().lower() if field_value is not None else ""
+                            entity_norm_vals = _norm_values(field_value)
                             for idx in member_indexes:
                                 if not isinstance(idx, int) or idx < 0 or idx >= len(profiles):
                                     continue
@@ -740,12 +848,12 @@ class EntityResearchService:
                                 # Scoring
                                 score = 0.0
                                 prof_val = extracted.get(field_name)
-                                prof_val_norm = str(prof_val).strip().lower()
-                                if value_norm and prof_val_norm:
-                                    if prof_val_norm == value_norm:
-                                        score += 5.0  # exact match gets highest boost
-                                    elif value_norm in prof_val_norm or prof_val_norm in value_norm:
-                                        score += 2.0  # partial/substring match
+                                prof_norm_vals = _norm_values(prof_val)
+                                if entity_norm_vals and prof_norm_vals:
+                                    if any(ev == pv for ev in entity_norm_vals for pv in prof_norm_vals):
+                                        score += 5.0
+                                    elif any((ev in pv or pv in ev) for ev in entity_norm_vals for pv in prof_norm_vals):
+                                        score += 2.0
                                 
                                 # Enhanced scoring for date-based fields
                                 # Check if value is explicitly mentioned vs calculated/inferred
@@ -807,27 +915,26 @@ class EntityResearchService:
                         # Replace or set entity field_sources with ranked list
                         if ranked_field_sources:
                             ent['field_sources'] = ranked_field_sources
-                    # Enforce uniqueness of sources across different entities (assign to earlier/better ones first)
+                    # Optional: enforce uniqueness of sources across entities (disabled by default)
                     try:
-                        assigned: set = set()
-                        # Prefer entities that are closer to query/name similarity if provided
-                        ordered_ents = sorted(final_entities['entities'], key=lambda e: (
-                            not bool(e.get('same_as_query')), -float(e.get('name_similarity_to_query') or 0.0)
-                        ))
-                        for ent in ordered_ents:
-                            fs = ent.get('field_sources') or {}
-                            new_fs: Dict[str, List[int]] = {}
-                            for fname, sids in fs.items():
-                                filtered = [sid for sid in (sids or []) if sid not in assigned]
-                                if filtered:
-                                    new_fs[fname] = filtered
-                            # Update assigned with all sources used by this entity (across its fields)
-                            used_here = set()
-                            for arr in new_fs.values():
-                                used_here.update(arr)
-                            assigned.update(used_here)
-                            if new_fs:
-                                ent['field_sources'] = new_fs
+                        if os.getenv("DEDUP_SOURCES_ACROSS_ENTITIES", "false").lower() == "true":
+                            assigned: set = set()
+                            ordered_ents = sorted(final_entities['entities'], key=lambda e: (
+                                not bool(e.get('same_as_query')), -float(e.get('name_similarity_to_query') or 0.0)
+                            ))
+                            for ent in ordered_ents:
+                                fs = ent.get('field_sources') or {}
+                                new_fs: Dict[str, List[int]] = {}
+                                for fname, sids in fs.items():
+                                    filtered = [sid for sid in (sids or []) if sid not in assigned]
+                                    if filtered:
+                                        new_fs[fname] = filtered
+                                used_here = set()
+                                for arr in new_fs.values():
+                                    used_here.update(arr)
+                                assigned.update(used_here)
+                                if new_fs:
+                                    ent['field_sources'] = new_fs
                     except Exception:
                         pass
             except Exception as e:

@@ -257,7 +257,7 @@ const Results = () => {
           if (data.live_results) {
             setFinalResults(data.live_results);
           }
-          if (data.status === 'completed') {
+          if (data.status === 'completed' || data.status === 'cancelled') {
             setFinalResults(data.results);
             if (intervalRef.current) {
               clearInterval(intervalRef.current);

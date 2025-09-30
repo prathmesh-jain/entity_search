@@ -82,7 +82,7 @@ def get_research_service():
     global _research_service_instance
     if _research_service_instance is None:
         _research_service_instance = EntityResearchService(
-            max_search_results=20,  # tune as needed based on engines
+            max_search_results=10,  # tune as needed based on engines
             max_concurrent_requests=10  # slightly higher concurrency for faster throughput
         )
     return _research_service_instance
