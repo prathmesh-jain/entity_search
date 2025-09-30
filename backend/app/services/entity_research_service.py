@@ -129,19 +129,97 @@ class EntityResearchService:
                     per_field_sources_copy = {k: sorted(list(v)) for k, v in per_field_sources.items()}
                     sources_meta_sorted = sorted(list(sources_meta), key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
 
-                    # Do a quick local consolidation on current profiles
-                    try:
-                        local_entities = self._local_consolidate(entity_name, profiles_copy, source_url_to_id)
-                        final_entities_snapshot = {"entities": local_entities}
-                    except Exception:
-                        final_entities_snapshot = {"entities": []}
-
-                    # Prefer streaming LLM-consolidated entities if any are available
+                    # Prefer streaming LLM-consolidated entities if any are available; else show raw profiles
                     try:
                         if consolidated_entities:
                             final_entities_snapshot = {"entities": list(consolidated_entities)}
+                        else:
+                            final_entities_snapshot = {"entities": self._build_raw_entities(entity_name, profiles_copy, source_url_to_id)}
                     except Exception:
-                        pass
+                        final_entities_snapshot = {"entities": self._build_raw_entities(entity_name, profiles_copy, source_url_to_id)}
+
+                    # Enrich snapshot entities with ranked field_sources (same logic as final)
+                    try:
+                        if isinstance(final_entities_snapshot, dict) and isinstance(final_entities_snapshot.get('entities'), list):
+                            def _snap_norm(s: Optional[str]) -> str:
+                                return (s or '').strip().lower()
+
+                            for ent in final_entities_snapshot['entities']:
+                                combined_fields = ent.get('combined_fields', {}) or {}
+                                member_indexes = ent.get('member_profile_indexes')
+                                if not member_indexes:
+                                    ent_name_norm = _snap_norm(ent.get('canonical_name'))
+                                    inferred_idxs: List[int] = []
+                                    if ent.get('same_as_query'):
+                                        for i, prof in enumerate(profiles_copy):
+                                            if bool((prof or {}).get('same_as_input')):
+                                                inferred_idxs.append(i)
+                                    else:
+                                        for i, prof in enumerate(profiles_copy):
+                                            pname = _snap_norm((prof or {}).get('detected_entity_name'))
+                                            if ent_name_norm and pname:
+                                                sim = SequenceMatcher(None, ent_name_norm, pname).ratio()
+                                                if sim >= name_match_threshold:
+                                                    inferred_idxs.append(i)
+                                    member_indexes = sorted(list(set(inferred_idxs)))
+                                    ent['member_profile_indexes'] = member_indexes
+
+                                ranked_field_sources: Dict[str, List[int]] = {}
+                                for field_name, field_value in combined_fields.items():
+                                    candidate_scores: Dict[int, float] = {}
+                                    value_norm = str(field_value).strip().lower() if field_value is not None else ""
+                                    for idx in member_indexes:
+                                        if not isinstance(idx, int) or idx < 0 or idx >= len(profiles_copy):
+                                            continue
+                                        prof = profiles_copy[idx] or {}
+                                        extracted = prof.get('extracted_info') or {}
+                                        if field_name not in extracted or extracted[field_name] in (None, "", [], {}):
+                                            continue
+                                        url = prof.get('source_url')
+                                        sid = source_url_to_id.get(url)
+                                        if not sid:
+                                            continue
+                                        score = 0.0
+                                        prof_val = extracted.get(field_name)
+                                        prof_val_norm = str(prof_val).strip().lower()
+                                        if value_norm and prof_val_norm:
+                                            if prof_val_norm == value_norm:
+                                                score += 5.0
+                                            elif value_norm in prof_val_norm or prof_val_norm in value_norm:
+                                                score += 2.0
+
+                                        if field_name in ['age', 'date_of_birth', 'year_of_birth']:
+                                            prof_val_str = str(prof_val) if prof_val else ""
+                                            explicit_patterns = ['(from article)', '(as of 20', '(stated)', '(mentioned)']
+                                            calculated_patterns = ['(calculated', '(computed', '(inferred', '(derived', f'(as of {datetime.now().strftime("%Y-%m-%d")})']
+                                            is_explicit = any(p in prof_val_str for p in explicit_patterns)
+                                            if field_name == 'age' and '(as of 20' in prof_val_str and f'(as of {datetime.now().strftime("%Y-%m-%d")})' not in prof_val_str:
+                                                is_explicit = True
+                                            is_calculated = any(p in prof_val_str for p in calculated_patterns)
+                                            if is_explicit:
+                                                score += 3.0
+                                            elif is_calculated:
+                                                score -= 1.0
+
+                                        field_src_map = prof.get('field_sources') or {}
+                                        if isinstance(field_src_map, dict) and field_name in field_src_map:
+                                            score += 2.0
+                                        try:
+                                            score += float(prof.get('confidence') or 0.0) * 1.5
+                                        except Exception:
+                                            pass
+                                        try:
+                                            score += float(prof.get('name_similarity_score') or 0.0) * 1.0
+                                        except Exception:
+                                            pass
+                                        candidate_scores[sid] = max(candidate_scores.get(sid, 0.0), score)
+                                    if candidate_scores:
+                                        ordered = sorted(candidate_scores.items(), key=lambda kv: (-kv[1], kv[0]))
+                                        ranked_field_sources[field_name] = [sid for sid, _ in ordered]
+                                if ranked_field_sources:
+                                    ent['field_sources'] = ranked_field_sources
+                    except Exception as e:
+                        self.logger.debug(f"snapshot field_sources enrichment error: {e}")
 
                     # Filter clusters and profiles similarly to final pass to avoid empty noise
                     filtered_clusters = {}
@@ -328,17 +406,28 @@ class EntityResearchService:
                             except Exception as e:
                                 self.logger.debug(f"partial snapshot emit error: {e}")
 
-                            # Early stop check based on field coverage and name match
+                            # Early stop check based on field coverage and name match (no local combine)
                             try:
                                 if not early_stop_event.is_set():
-                                    snapshot_entities = self._local_consolidate(entity_name, profiles, source_url_to_id)
-                                    if snapshot_entities:
-                                        best = snapshot_entities[0]
-                                        cname = best.get('canonical_name') or ''
-                                        same_as = bool(best.get('same_as_query'))
+                                    # Group profiles by query-name match or detected name
+                                    groups_fields: Dict[str, set] = {}
+                                    group_names: Dict[str, str] = {}
+                                    for p in profiles:
+                                        key = '__query__' if p.get('same_as_input') else _norm(p.get('detected_entity_name'))
+                                        if not key:
+                                            continue
+                                        ex = p.get('extracted_info') or {}
+                                        present = {k for k, v in (ex.items() if isinstance(ex, dict) else []) if v not in (None, "", [], {})}
+                                        if present:
+                                            groups_fields.setdefault(key, set()).update(present)
+                                            if key not in group_names and p.get('detected_entity_name'):
+                                                group_names[key] = p.get('detected_entity_name')
+                                    # Evaluate groups for early stop
+                                    for gkey, fset in groups_fields.items():
+                                        cname = group_names.get(gkey) or (entity_name if gkey == '__query__' else '')
+                                        same_as = (gkey == '__query__')
                                         name_ratio = SequenceMatcher(None, _norm(entity_name), _norm(cname)).ratio() if cname else 0.0
-                                        fields_present = set([k for k, v in (best.get('combined_fields') or {}).items() if v not in (None, "", [], {})])
-                                        if (same_as or name_ratio >= name_match_threshold) and target_fields.issubset(fields_present):
+                                        if (same_as or name_ratio >= name_match_threshold) and target_fields.issubset(fset):
                                             early_stop_event.set()
                                             if progress_callback:
                                                 progress_callback(phase="combining", payload={
@@ -346,6 +435,7 @@ class EntityResearchService:
                                                     "profiles_count": len(profiles),
                                                     "result_snapshot": _build_result_snapshot()
                                                 })
+                                            break
                             except Exception as e:
                                 self.logger.debug(f"early stop check error: {e}")
                             
@@ -497,11 +587,12 @@ class EntityResearchService:
                 self.logger.info(f"Starting traditional consolidation | mode={'LLM' if use_llm_combine else 'LOCAL'} | profiles={len(profiles)}")
 
                 if not use_llm_combine:
-                    final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
-                    self.logger.info("Local consolidation completed")
+                    # Do not perform local consolidation; return raw profiles as entities
+                    final_entities = {"entities": self._build_raw_entities(entity_name, profiles, source_url_to_id)}
+                    self.logger.info("LLM consolidation disabled; returning raw profiles as entities")
                     if progress_callback:
                         progress_callback(phase="combining", payload={
-                            "message": "Consolidation completed (local)",
+                            "message": "Consolidation skipped (raw entities)",
                             "profiles_count": len(profiles)
                         })
                 else:
@@ -515,12 +606,12 @@ class EntityResearchService:
                         
                         self.logger.info("Final consolidation completed (LLM)")
                         if not final_entities or not final_entities.get("entities"):
-                            self.logger.info("LLM consolidation returned empty; using local consolidation fallback")
-                            final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
+                            self.logger.info("LLM consolidation returned empty; using raw entities fallback")
+                            final_entities = {"entities": self._build_raw_entities(entity_name, profiles, source_url_to_id)}
                     except Exception as e:
                         self.logger.error(f"LLM consolidation failed: {e}")
-                        self.logger.info("Using local consolidation fallback due to LLM error")
-                        final_entities = {"entities": self._local_consolidate(entity_name, profiles, source_url_to_id)}
+                        self.logger.info("Using raw entities fallback due to LLM error")
+                        final_entities = {"entities": self._build_raw_entities(entity_name, profiles, source_url_to_id)}
             
             # Prepare the final result
             # Include final entities produced by combine pass
@@ -608,37 +699,27 @@ class EntityResearchService:
                         if url and url not in src_to_idx:
                             src_to_idx[url] = i
 
-                    # Build cluster -> member indexes map using clusters built earlier
-                    cluster_index_map: Dict[str, List[int]] = {}
-                    for cname, cprofiles in (clusters or {}).items():
-                        idxs = []
-                        for p in (cprofiles or []):
-                            url = (p or {}).get('source_url')
-                            if url and url in src_to_idx:
-                                idxs.append(src_to_idx[url])
-                        cluster_index_map[_norm(cname)] = sorted(list(set(idxs)))
-
                     for ent in final_entities['entities']:
                         combined_fields = ent.get('combined_fields', {}) or {}
                         member_indexes = ent.get('member_profile_indexes')
                         if not member_indexes:
-                            # Infer members when not provided by LLM combine
+                            # Infer members strictly per entity to avoid cross-entity source bleed
                             ent_name_norm = _norm(ent.get('canonical_name'))
-                            best_key = None
-                            best_score = -1.0
-                            # If LLM marked as same as query, prefer the 'query_name' cluster
-                            if ent.get('same_as_query') and 'query_name' in cluster_index_map:
-                                best_key = 'query_name'
-                                best_score = 1.0
+                            inferred_idxs: List[int] = []
+                            if ent.get('same_as_query'):
+                                # Only profiles marked same_as_input
+                                for i, prof in enumerate(profiles):
+                                    if bool((prof or {}).get('same_as_input')):
+                                        inferred_idxs.append(i)
                             else:
-                                for k in cluster_index_map.keys():
-                                    if k in ('uncertain',):
-                                        continue
-                                    score = SequenceMatcher(None, ent_name_norm, k).ratio() if ent_name_norm else 0.0
-                                    if score > best_score:
-                                        best_score = score
-                                        best_key = k
-                            member_indexes = cluster_index_map.get(best_key or '', [])
+                                # High name similarity between entity canonical_name and profile detected name
+                                for i, prof in enumerate(profiles):
+                                    pname = _norm((prof or {}).get('detected_entity_name'))
+                                    if ent_name_norm and pname:
+                                        sim = SequenceMatcher(None, ent_name_norm, pname).ratio()
+                                        if sim >= name_match_threshold:
+                                            inferred_idxs.append(i)
+                            member_indexes = sorted(list(set(inferred_idxs)))
                             ent['member_profile_indexes'] = member_indexes
                         ranked_field_sources: Dict[str, List[int]] = {}
                         for field_name, field_value in combined_fields.items():
@@ -726,6 +807,29 @@ class EntityResearchService:
                         # Replace or set entity field_sources with ranked list
                         if ranked_field_sources:
                             ent['field_sources'] = ranked_field_sources
+                    # Enforce uniqueness of sources across different entities (assign to earlier/better ones first)
+                    try:
+                        assigned: set = set()
+                        # Prefer entities that are closer to query/name similarity if provided
+                        ordered_ents = sorted(final_entities['entities'], key=lambda e: (
+                            not bool(e.get('same_as_query')), -float(e.get('name_similarity_to_query') or 0.0)
+                        ))
+                        for ent in ordered_ents:
+                            fs = ent.get('field_sources') or {}
+                            new_fs: Dict[str, List[int]] = {}
+                            for fname, sids in fs.items():
+                                filtered = [sid for sid in (sids or []) if sid not in assigned]
+                                if filtered:
+                                    new_fs[fname] = filtered
+                            # Update assigned with all sources used by this entity (across its fields)
+                            used_here = set()
+                            for arr in new_fs.values():
+                                used_here.update(arr)
+                            assigned.update(used_here)
+                            if new_fs:
+                                ent['field_sources'] = new_fs
+                    except Exception:
+                        pass
             except Exception as e:
                 self.logger.debug(f"field_sources ranking error: {e}")
 
@@ -769,6 +873,33 @@ class EntityResearchService:
             'entity_info': {},
             'sources': []
         }
+
+    def _build_raw_entities(self, entity_name: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Turn individual profiles into raw entities with per-field source IDs when available.
+
+        This performs no consolidation. Each profile becomes a single entity.
+        """
+        entities: List[Dict[str, Any]] = []
+        for prof in profiles or []:
+            if not isinstance(prof, dict):
+                continue
+            src_url = (prof or {}).get('source_url')
+            sid = (source_url_to_id or {}).get(src_url)
+            extracted = (prof or {}).get('extracted_info') or {}
+            field_srcs: Dict[str, List[int]] = {}
+            if sid:
+                for f, v in (extracted.items() if isinstance(extracted, dict) else []):
+                    if v not in (None, "", [], {}):
+                        field_srcs[f] = [sid]
+            entities.append({
+                "canonical_name": ((prof or {}).get("detected_entity_name") or (entity_name if (prof or {}).get("same_as_input") else "")).strip(),
+                "same_as_query": bool((prof or {}).get("same_as_input")),
+                "combined_fields": extracted,
+                "field_sources": field_srcs,
+                "member_profile_indexes": [],
+                "sources": [src_url] if src_url else []
+            })
+        return entities
 
     async def _generate_search_queries(self, entity_name: str, entity_type: str, keywords: Optional[List[str]] = None) -> List[str]:
         """Generate search queries for the given entity name and optional keywords.
@@ -1056,110 +1187,6 @@ class EntityResearchService:
         # Crawl the pages
         return await self.crawler.crawl(urls)
 
-    def _local_consolidate(self, entity_name: str, profiles: List[Dict[str, Any]], source_url_to_id: Dict[str, int]) -> List[Dict[str, Any]]:
-        """Deterministic, fast consolidation when LLM combine is disabled/unavailable.
-
-        Strategy:
-        - Group profiles by:
-          1) same_as_input=True => group key '__query__'
-          2) else by normalized detected_entity_name
-          3) fall back to '__uncertain__'
-        - Merge fields: prefer non-empty values; lists are unioned; scalars keep first non-empty.
-        """
-        def norm_name(n: Optional[str]) -> str:
-            return (n or '').strip().lower()
-
-        groups: Dict[str, Dict[str, Any]] = {}
-        index_map: Dict[str, List[int]] = {}
-
-        for idx, p in enumerate(profiles):
-            key = '__uncertain__'
-            if p.get('same_as_input'):
-                key = '__query__'
-            else:
-                dn = norm_name(p.get('detected_entity_name'))
-                if dn:
-                    key = dn
-
-            groups.setdefault(key, {"combined_fields": {}, "same_as_query": key == '__query__', "canonical_name": None})
-            index_map.setdefault(key, []).append(idx)
-
-            # canonical name
-            if not groups[key]["canonical_name"] and p.get("detected_entity_name"):
-                groups[key]["canonical_name"] = p.get("detected_entity_name")
-
-            fields = (p.get('extracted_info') or {})
-            for f, v in fields.items():
-                if v in (None, ""):
-                    continue
-                existing = groups[key]["combined_fields"].get(f)
-                if existing is None:
-                    groups[key]["combined_fields"][f] = v
-                else:
-                    # Merge: lists => union; scalars => coerce to list and union
-                    if isinstance(existing, list) or isinstance(v, list):
-                        a = existing if isinstance(existing, list) else [existing]
-                        b = v if isinstance(v, list) else [v]
-                        merged = []
-                        seen = set()
-                        for it in a + b:
-                            try:
-                                marker = json.dumps(it, sort_keys=True) if isinstance(it, (dict, list)) else str(it)
-                            except Exception:
-                                marker = str(it)
-                            if marker not in seen:
-                                merged.append(it)
-                                seen.add(marker)
-                        groups[key]["combined_fields"][f] = merged
-
-        entities: List[Dict[str, Any]] = []
-        for k, data in groups.items():
-            # Filter out entities with no meaningful data
-            combined_fields = data["combined_fields"]
-            if not combined_fields or len(combined_fields) == 0:
-                continue
-                
-            # Build field-specific sources mapping with source IDs
-            field_sources = {}
-            member_indexes = index_map.get(k, [])
-            
-            for field_name, field_value in combined_fields.items():
-                if field_value is not None and field_value != "":
-                    # Find source IDs for this specific field from member profiles
-                    field_source_ids = set()
-                    for idx in member_indexes:
-                        if idx < len(profiles):
-                            profile = profiles[idx]
-                            extracted_info = profile.get("extracted_info", {})
-                            if field_name in extracted_info and extracted_info[field_name] == field_value:
-                                source_url = profile.get("source_url")
-                                if source_url and source_url in source_url_to_id:
-                                    field_source_ids.add(source_url_to_id[source_url])
-                    
-                    field_sources[field_name] = sorted(list(field_source_ids))
-            
-            # Name similarity score to query for display and filtering
-            canonical_name = data["canonical_name"] or (entity_name if k == '__query__' else None)
-            try:
-                name_similarity = SequenceMatcher(None, (entity_name or '').lower(), (canonical_name or '').lower()).ratio() if canonical_name else 0.0
-            except Exception:
-                name_similarity = 0.0
-
-            entities.append({
-                "canonical_name": canonical_name,
-                "same_as_query": data["same_as_query"],
-                "name_similarity_to_query": name_similarity,
-                "consolidation_confidence": 0.7 if data["same_as_query"] else max(0.4, name_similarity),
-                "combined_fields": combined_fields,
-                "field_sources": field_sources,  # Sources tied to specific fields
-                "member_profile_indexes": member_indexes,
-                "sources": [profiles[i].get("source_url", "") for i in member_indexes if i < len(profiles) and profiles[i].get("source_url")]
-            })
-
-        # Sort entities by fuzzy matching similarity to query name
-        entities = self._sort_entities_by_similarity(entity_name, entities)
-        return entities
-
     def _sort_entities_by_similarity(self, query_name: str, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Sort entities by name similarity to query using fuzzy matching."""
         def similarity_score(entity):
@@ -1183,9 +1210,9 @@ class EntityResearchService:
             return result
         except Exception as e:
             self.logger.warning(f"Chunk {chunk_id} consolidation failed: {e}, using local fallback")
-            # Fallback to local consolidation for this chunk
-            local_entities = self._local_consolidate(entity_name, chunk_profiles, {})
-            return {"entities": local_entities}
+            # Fallback to raw entities for this chunk (no local consolidation)
+            raw_entities = self._build_raw_entities(entity_name, chunk_profiles, {})
+            return {"entities": raw_entities}
 
     async def _chunked_consolidation(
         self,

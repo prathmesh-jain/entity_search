@@ -801,8 +801,8 @@ const Results = () => {
 
                           const categoryName = key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
 
-                          // Get field-specific source IDs from per_field_sources (same as Overview tab)
-                          const fieldSourceIds = fieldSources[key] || per_field_sources[key] || [];
+                          // Use only per-entity field-specific source IDs
+                          const fieldSourceIds = fieldSources[key] || [];
 
                           tableRows.push({
                             category: categoryName,
@@ -915,7 +915,7 @@ const Results = () => {
                                             )}
                                           </>
                                         ) : (
-                                          <span className="text-gray-400 italic text-xs">All sources</span>
+                                          <span className="text-gray-400 italic text-xs">No sources</span>
                                         )}
                                       </div>
                                     </td>
