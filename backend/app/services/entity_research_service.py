@@ -1096,6 +1096,52 @@ class EntityResearchService:
             except Exception:
                 pass
 
+            # Rebuild clusters to align 1:1 with final entities using assigned sources
+            try:
+                clusters_by_entity: Dict[str, List[Dict[str, Any]]] = {}
+                # Map source_id -> profile index from original crawl
+                id_to_idx_map: Dict[int, int] = {}
+                try:
+                    for i, p in enumerate(profiles):
+                        surl = (p or {}).get('source_url')
+                        sid = source_url_to_id.get(surl)
+                        if sid is not None and sid not in id_to_idx_map:
+                            id_to_idx_map[int(sid)] = i
+                except Exception:
+                    pass
+                # Build cluster per entity from its assigned field source IDs
+                if isinstance(final_entities, dict) and isinstance(final_entities.get('entities'), list):
+                    for idx, ent in enumerate(final_entities['entities']):
+                        # Collect used sids from field_sources (post safety filter)
+                        used_sids: set = set()
+                        fs = ent.get('field_sources') or {}
+                        for arr in (fs.values() if isinstance(fs, dict) else []):
+                            for sid in (arr or []):
+                                if sid is not None:
+                                    used_sids.add(int(sid))
+                        # Map source IDs -> profiles
+                        items: List[Dict[str, Any]] = []
+                        seen_urls: set = set()
+                        for sid in sorted(list(used_sids)):
+                            pi = id_to_idx_map.get(int(sid))
+                            if pi is None or pi < 0 or pi >= len(profiles):
+                                continue
+                            prof = profiles[pi]
+                            surl = (prof or {}).get('source_url')
+                            if surl and surl in seen_urls:
+                                continue
+                            if surl:
+                                seen_urls.add(surl)
+                            items.append(prof)
+                        name = (ent.get('canonical_name') or f"Entity {idx+1}").strip() or f"Entity {idx+1}"
+                        # Always include the cluster key so UI shows same number of groups as final entities
+                        clusters_by_entity[name] = items
+                # Override filtered_clusters with entity-aligned groups
+                if clusters_by_entity:
+                    filtered_clusters = clusters_by_entity
+            except Exception as e:
+                self.logger.debug(f"clusters rebuild error: {e}")
+
             # Ensure deterministic ordering of sources by their assigned ID
             sources_meta_sorted = sorted(sources_meta, key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
 
