@@ -358,7 +358,8 @@ class EntityResearchService:
                                 **llm_result,
                                 "source_url": page.url,
                                 "source_title": page.title,
-                                "status_code": page.status_code
+                                "status_code": page.status_code,
+                                "source_id": source_id
                             }
                             profiles.append(profile)
                             
@@ -572,11 +573,41 @@ class EntityResearchService:
                         "same_as_input": entity.get("same_as_query", False),
                         "confidence": 0.8,  # High confidence for already consolidated entities
                         "extracted_info": entity.get("combined_fields", {}),
-                        "source_url": f"consolidated_chunk_{idx}"
+                        "source_url": f"consolidated_chunk_{idx}",
+                        # carry forward original member sources so we can map after final pass
+                        "origin_member_source_ids": list(entity.get("member_source_ids", []) or []),
+                        "origin_member_source_urls": list(entity.get("member_source_urls", []) or []),
                     })
                 
                 try:
                     final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, final_profiles)
+                    # Map final member_profile_indexes to original member sources aggregated above
+                    try:
+                        if isinstance(final_entities, dict) and isinstance(final_entities.get("entities"), list):
+                            for ent in final_entities["entities"]:
+                                idxs = ent.get("member_profile_indexes") or []
+                                ids: List[int] = []
+                                urls: List[str] = []
+                                for i in idxs:
+                                    try:
+                                        prof = final_profiles[i]
+                                    except Exception:
+                                        continue
+                                    ids.extend([int(x) for x in (prof.get("origin_member_source_ids") or []) if x is not None])
+                                    urls.extend([u for u in (prof.get("origin_member_source_urls") or []) if u])
+                                # de-duplicate
+                                seen_i = set(); uniq_i: List[int] = []
+                                for v in ids:
+                                    if v not in seen_i:
+                                        uniq_i.append(v); seen_i.add(v)
+                                seen_u = set(); uniq_u: List[str] = []
+                                for v in urls:
+                                    if v not in seen_u:
+                                        uniq_u.append(v); seen_u.add(v)
+                                ent["member_source_ids"] = uniq_i
+                                ent["member_source_urls"] = uniq_u
+                    except Exception as me:
+                        self.logger.debug(f"final member mapping error: {me}")
                     self.logger.info("Streaming consolidation with final pass completed")
                 except Exception as e:
                     self.logger.warning(f"Final consolidation failed: {e}, using streaming results as-is")
@@ -603,6 +634,37 @@ class EntityResearchService:
                         else:
                             # Direct consolidation for smaller sets
                             final_entities = await self.llm_client.consolidate_clusters(entity_name, entity_type, profiles)
+                            # Map LLM member_profile_indexes to original profile sources
+                            try:
+                                if isinstance(final_entities, dict) and isinstance(final_entities.get("entities"), list):
+                                    for ent in final_entities["entities"]:
+                                        idxs = ent.get("member_profile_indexes") or []
+                                        ids: List[int] = []
+                                        urls: List[str] = []
+                                        for i in idxs:
+                                            try:
+                                                p = profiles[i]
+                                            except Exception:
+                                                continue
+                                            sid = (p or {}).get("source_id")
+                                            surl = (p or {}).get("source_url")
+                                            if sid is not None:
+                                                ids.append(int(sid))
+                                            if surl:
+                                                urls.append(surl)
+                                        # de-duplicate
+                                        si = set(); ui: List[int] = []
+                                        for v in ids:
+                                            if v not in si:
+                                                ui.append(v); si.add(v)
+                                        su = set(); uu: List[str] = []
+                                        for v in urls:
+                                            if v not in su:
+                                                uu.append(v); su.add(v)
+                                        ent["member_source_ids"] = ui
+                                        ent["member_source_urls"] = uu
+                            except Exception as mp:
+                                self.logger.debug(f"direct member mapping error: {mp}")
                         
                         self.logger.info("Final consolidation completed (LLM)")
                         if not final_entities or not final_entities.get("entities"):
@@ -791,10 +853,29 @@ class EntityResearchService:
                         url = (prof or {}).get('source_url')
                         if url and url not in src_to_idx:
                             src_to_idx[url] = i
+                    # Build mapping: source_id -> profile index (stable mapping back to crawled profiles)
+                    id_to_idx: Dict[int, int] = {}
+                    try:
+                        for i, prof in enumerate(profiles):
+                            purl = (prof or {}).get('source_url')
+                            sid = source_url_to_id.get(purl)
+                            if sid is not None and sid not in id_to_idx:
+                                id_to_idx[int(sid)] = i
+                    except Exception:
+                        pass
 
                     for ent in final_entities['entities']:
                         combined_fields = ent.get('combined_fields', {}) or {}
                         member_indexes = ent.get('member_profile_indexes')
+                        # Prefer explicit member_source_ids mapped back to original profiles
+                        try:
+                            msids = [int(x) for x in (ent.get('member_source_ids') or [])]
+                        except Exception:
+                            msids = []
+                        if msids:
+                            mapped = [id_to_idx[s] for s in msids if isinstance(s, int) and s in id_to_idx]
+                            if mapped:
+                                member_indexes = sorted(list(set(mapped)))
                         if not member_indexes:
                             # Infer members strictly per entity to avoid cross-entity source bleed
                             ent_name_norm = _norm(ent.get('canonical_name'))
@@ -972,6 +1053,48 @@ class EntityResearchService:
                 self.logger.debug(f"field_sources ranking error: {e}")
 
             # Removed code-based age/YOB/DOB normalization to rely on LLM-provided normalization
+
+            # Final safety: ensure no field retains a value without at least one source,
+            # and no entity is returned without sources. If absolutely no sources exist, return empty result.
+            try:
+                if isinstance(final_entities, dict) and isinstance(final_entities.get('entities'), list):
+                    cleaned_entities: List[Dict[str, Any]] = []
+                    for ent in final_entities['entities']:
+                        cf = ent.get('combined_fields') or {}
+                        fs = ent.get('field_sources') or {}
+                        new_cf: Dict[str, Any] = {}
+                        new_fs: Dict[str, List[int]] = {}
+                        used: set = set()
+                        # Only keep fields that both have a value and at least one source id assigned
+                        if isinstance(cf, dict):
+                            for fname, fval in cf.items():
+                                if fval in (None, "", [], {}):
+                                    continue
+                                sids = fs.get(fname) or []
+                                sids = [sid for sid in sids if sid is not None]
+                                if sids:
+                                    new_cf[fname] = fval
+                                    new_fs[fname] = sids
+                                    for sid in sids:
+                                        used.add(sid)
+                        # If this entity ends up with no sources, drop the entity entirely
+                        if used:
+                            ent['combined_fields'] = new_cf
+                            ent['field_sources'] = new_fs
+                            # expose entity_sources for clarity
+                            ent['entity_sources'] = sorted(list(used))
+                            cleaned_entities.append(ent)
+                    final_entities['entities'] = cleaned_entities
+            except Exception as e:
+                self.logger.debug(f"entity safety filter failed: {e}")
+
+            # If globally no sources, or no entities left, return an empty result to avoid front-end showing empty details
+            try:
+                if (not sources_meta) or (not isinstance(final_entities, dict)) or (not final_entities.get('entities')):
+                    self.logger.info("No sources or no entities after safety filter; returning empty result")
+                    return self._create_empty_result(entity_name, "No verifiable sources for extracted details")
+            except Exception:
+                pass
 
             # Ensure deterministic ordering of sources by their assigned ID
             sources_meta_sorted = sorted(sources_meta, key=lambda s: (s.get("source_id") is None, s.get("source_id", 10**9)))
@@ -1345,13 +1468,48 @@ class EntityResearchService:
                 chunk_profiles,
             )
             self.logger.info(f"Chunk {chunk_id} consolidation completed")
+            # Map LLM-local member_profile_indexes -> stable source IDs and URLs from chunk_profiles
+            try:
+                if isinstance(result, dict) and isinstance(result.get("entities"), list):
+                    for ent in result["entities"]:
+                        idxs = ent.get("member_profile_indexes") or []
+                        src_ids: List[int] = []
+                        src_urls: List[str] = []
+                        for i in idxs:
+                            try:
+                                prof = chunk_profiles[i]
+                            except Exception:
+                                continue
+                            sid = (prof or {}).get("source_id")
+                            surl = (prof or {}).get("source_url")
+                            if sid is not None:
+                                src_ids.append(int(sid))
+                            if surl:
+                                src_urls.append(surl)
+                        # de-duplicate while preserving order
+                        seen_ids = set()
+                        ids_unique: List[int] = []
+                        for v in src_ids:
+                            if v not in seen_ids:
+                                ids_unique.append(v)
+                                seen_ids.add(v)
+                        seen_urls = set()
+                        urls_unique: List[str] = []
+                        for v in src_urls:
+                            if v not in seen_urls:
+                                urls_unique.append(v)
+                                seen_urls.add(v)
+                        ent["member_source_ids"] = ids_unique
+                        ent["member_source_urls"] = urls_unique
+            except Exception as e:
+                self.logger.debug(f"chunk member mapping error: {e}")
             return result
         except Exception as e:
             self.logger.warning(f"Chunk {chunk_id} consolidation failed: {e}, using local fallback")
             # Fallback to raw entities for this chunk (no local consolidation)
             raw_entities = self._build_raw_entities(entity_name, chunk_profiles, {})
             return {"entities": raw_entities}
-
+            
     async def _chunked_consolidation(
         self,
         entity_name: str,
