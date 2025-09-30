@@ -171,6 +171,9 @@ const Results = () => {
   const [headerMeta, setHeaderMeta] = useState({ search_id: finalResearchId || 'N/A', timestamp: new Date().toISOString() });
   const sseRef = useRef(null);
   const [sseConnected, setSseConnected] = useState(false);
+  const [showSourcesModal, setShowSourcesModal] = useState(false);
+  const [modalField, setModalField] = useState('');
+  const [modalSourceIds, setModalSourceIds] = useState([]);
 
   // SSE stream subscription for live updates
   useEffect(() => {
@@ -308,6 +311,17 @@ const Results = () => {
   const getSourceUrl = (sourceId) => {
     return sourceIdToDetails[sourceId]?.url || '#';
   };
+  const getDomain = (url) => {
+    try { return new URL(url).hostname; } catch (_) {
+      try { return (url || '').split('/')[2] || url; } catch { return url || ''; }
+    }
+  };
+  const openSourcesModal = (fieldLabel, sourceIds) => {
+    setModalField(fieldLabel);
+    setModalSourceIds(sourceIds || []);
+    setShowSourcesModal(true);
+  };
+  const closeSourcesModal = () => setShowSourcesModal(false);
   const search_keywords = finalResults?.search_queries || searchResults?.keywords || [];
 
   const adverse_mentions = [];
@@ -793,7 +807,8 @@ const Results = () => {
                           tableRows.push({
                             category: categoryName,
                             details: displayValue,
-                            sources: fieldSourceIds.slice(0, 3) // Show up to 3 source IDs per field
+                            sources: fieldSourceIds.slice(0, 3), // Show up to 3 source IDs per field
+                            allSources: fieldSourceIds
                           });
                         }
                       });
@@ -873,20 +888,32 @@ const Results = () => {
                                     <td className="px-6 py-4 text-sm text-gray-500">
                                       <div className="flex flex-wrap gap-1">
                                         {row.sources.length > 0 ? (
-                                          row.sources.map((sourceId, sourceIndex) => (
-                                            <a
-                                              key={sourceIndex}
-                                              href={getSourceUrl(sourceId)}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
-                                              className="inline-flex items-center px-2 py-1 rounded text-xs bg-blue-100 text-blue-800 hover:bg-blue-200 transition-colors"
-                                            >
-                                              <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                                              </svg>
-                                              {sourceId}
-                                            </a>
-                                          ))
+                                          <>
+                                            {row.sources.map((sourceId, sourceIndex) => (
+                                              <a
+                                                key={sourceIndex}
+                                                href={getSourceUrl(sourceId)}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="inline-flex items-center px-2 py-1 rounded text-xs bg-blue-100 text-blue-800 hover:bg-blue-200 transition-colors"
+                                                title={getSourceUrl(sourceId)}
+                                              >
+                                                <svg className="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                                                </svg>
+                                                {sourceId}
+                                              </a>
+                                            ))}
+                                            {Array.isArray(row.allSources) && row.allSources.length > 3 && (
+                                              <button
+                                                type="button"
+                                                onClick={() => openSourcesModal(row.category, row.allSources)}
+                                                className="inline-flex items-center px-2 py-1 rounded text-xs bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors"
+                                              >
+                                                View all ({row.allSources.length})
+                                              </button>
+                                            )}
+                                          </>
                                         ) : (
                                           <span className="text-gray-400 italic text-xs">All sources</span>
                                         )}
@@ -1277,8 +1304,66 @@ const Results = () => {
           </button>
         </div>
       </div>
+
+      {/* View All Sources Modal */}
+      {showSourcesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={closeSourcesModal} />
+          <div className="relative w-full max-w-2xl mx-4 bg-white rounded-lg shadow-xl">
+            <div className="px-5 py-4 border-b flex items-center justify-between">
+              <h3 className="text-base font-semibold text-gray-900">All Sources for {modalField}</h3>
+              <button onClick={closeSourcesModal} className="text-gray-500 hover:text-gray-700 text-sm">Close</button>
+            </div>
+            <div className="max-h-[65vh] overflow-auto p-4">
+              {(!modalSourceIds || modalSourceIds.length === 0) ? (
+                <div className="text-sm text-gray-500">No sources available.</div>
+              ) : (
+                <ul className="divide-y divide-gray-200">
+                  {modalSourceIds.map((sid, idx) => {
+                    const url = getSourceUrl(sid);
+                    const domain = getDomain(url);
+                    const title = sourceIdToDetails[sid]?.title || url;
+                    return (
+                      <li key={`${sid}-${idx}`} className="py-3">
+                        <div className="flex items-start justify-between">
+                          <div className="min-w-0 pr-3">
+                            <div className="text-xs text-gray-500 mb-0.5">Source #{sid}</div>
+                            <div className="text-sm font-medium text-gray-900 truncate" title={title}>{title}</div>
+                            <a
+                              href={url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-600 hover:text-blue-800 break-all"
+                              title={url}
+                            >
+                              {domain}
+                            </a>
+                          </div>
+                          <a
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center px-2 py-1 rounded text-xs bg-blue-100 text-blue-800 hover:bg-blue-200 transition-colors"
+                            title="Open link"
+                          >
+                            Open
+                          </a>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t bg-gray-50 text-right">
+              <button onClick={closeSourcesModal} className="inline-flex items-center px-3 py-1.5 rounded text-sm bg-gray-200 hover:bg-gray-300 text-gray-800">Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
-};
+}
+;
 
 export default Results;

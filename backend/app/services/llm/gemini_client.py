@@ -80,7 +80,9 @@ class GeminiClient:
             You are an expert search query generator for entity research. Generate {num_queries} highly effective search queries to find comprehensive information about a specific {entity_context}.
             
             TARGET {entity_type.upper()}: "{entity_name}"
-            ENTITY TYPE: {entity_type}{keywords_context}
+            ENTITY TYPE: {entity_type}
+            
+            {keywords_context}
             
             QUERY GENERATION STRATEGY:
             
@@ -315,7 +317,9 @@ class GeminiClient:
         TARGET {entity_type.upper()}: '{entity_name}'
         ENTITY TYPE: {entity_type}
         CURRENT DATE: {current_date}
-        CURRENT YEAR: {current_year}{keywords_context}
+        CURRENT YEAR: {current_year}
+        
+        {keywords_context.replace(entity_name, "")}
         
         CRITICAL MATCHING CRITERIA:
         1. EXACT NAME MATCHING: The entity name must be EXACTLY '{entity_name}' or extremely close variations

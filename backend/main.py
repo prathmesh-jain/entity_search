@@ -428,7 +428,15 @@ async def perform_research(
                 
                 # Update history database with progress
                 if history_db:
-                    history_db.update_search_progress(research_id, "in_progress", phase)
+                    try:
+                        current_status = research_results.get(research_id, {}).get("status", "in_progress")
+                        # Keep DB status in sync; do not revert to in_progress if cancelled/failed
+                        if current_status in ("cancelled", "failed", "completed"):
+                            history_db.update_search_progress(research_id, current_status, current_status)
+                        else:
+                            history_db.update_search_progress(research_id, "in_progress", phase)
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.debug(f"progress_callback error: {e}")
 
@@ -604,7 +612,7 @@ async def health_check():
     }
 
 @app.post("/research-cancel/{research_id}")
-async def cancel_research(research_id: str):
+async def cancel_research(research_id: str, history_db: HistoryDatabase = Depends(get_history_db)):
     """Request cancellation of an active research task."""
     try:
         if research_id not in research_results:
@@ -612,9 +620,52 @@ async def cancel_research(research_id: str):
         # Mark as cancelled; workers will observe and stop soon
         research_results[research_id]["cancelled"] = True
         # If already completed/failed, reflect that
-        if research_results[research_id]["status"] in ("completed", "failed"):
+        if research_results[research_id]["status"] in ("completed", "failed", "cancelled"):
             return {"status": research_results[research_id]["status"]}
-        return {"status": "cancelling"}
+
+        # Immediately finalize as cancelled so UI and history reflect the state
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            snapshot = research_results[research_id].get("live_results") or research_results[research_id].get("results") or {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+
+            research_results[research_id].update({
+                "status": "cancelled",
+                "phase": "cancelled",
+                "completed_at": now_iso,
+                "results": snapshot
+            })
+
+            # Persist to history DB
+            try:
+                history_db.save_search_completion(research_id, snapshot, "cancelled")
+            except Exception as db_e:
+                logger.warning(f"Failed to save cancelled state to history for {research_id}: {db_e}")
+
+            # Notify subscribers
+            try:
+                _sse_broadcast(research_id, "state", {
+                    "status": research_results[research_id]["status"],
+                    "phase": research_results[research_id]["phase"],
+                    "progress": research_results[research_id].get("progress", {}),
+                    "events": research_results[research_id].get("events", []),
+                    "entity_name": research_results[research_id].get("entity_name"),
+                    "started_at": research_results[research_id].get("started_at"),
+                    "live_results": research_results[research_id].get("live_results"),
+                })
+                _sse_broadcast(research_id, "done", {
+                    "status": research_results[research_id]["status"],
+                    "results": research_results[research_id].get("results"),
+                    "completed_at": research_results[research_id].get("completed_at"),
+                    "error": None
+                })
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Immediate cancellation finalize error: {e}")
+
+        return {"status": "cancelled"}
     except HTTPException:
         raise
     except Exception as e:

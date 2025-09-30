@@ -136,6 +136,13 @@ class EntityResearchService:
                     except Exception:
                         final_entities_snapshot = {"entities": []}
 
+                    # Prefer streaming LLM-consolidated entities if any are available
+                    try:
+                        if consolidated_entities:
+                            final_entities_snapshot = {"entities": list(consolidated_entities)}
+                    except Exception:
+                        pass
+
                     # Filter clusters and profiles similarly to final pass to avoid empty noise
                     filtered_clusters = {}
                     for cluster_name, cluster_profiles in clusters_copy.items():
